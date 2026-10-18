@@ -12,6 +12,9 @@ DB_PATH = Path(__file__).parent / "aso_data.db"
 
 
 def get_conn(db_path: Path = DB_PATH) -> sqlite3.Connection:
+    db_path = Path(db_path)
+    if db_path.parent:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path), check_same_thread=False, isolation_level=None)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=MEMORY;")

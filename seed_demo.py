@@ -6,6 +6,7 @@
 from datetime import date, timedelta
 from pathlib import Path
 import shutil
+import tempfile
 
 from db import (
     add_keyword,
@@ -20,10 +21,14 @@ from apple_api import compute_keyword_difficulty, parse_app_id
 from optimizer import analyze_100_char_workspace
 
 
-def seed_database(target_db_path: Path = DB_PATH) -> None:
-    tmp_db = Path("/tmp/aso_seed_work.db")
+def seed_database(target_db_path: Path = DB_PATH) -> Path:
+    target_db_path = Path(target_db_path)
+    tmp_db = Path(tempfile.gettempdir()) / "aso_seed_work.db"
     if tmp_db.exists():
-        tmp_db.unlink()
+        try:
+            tmp_db.unlink()
+        except OSError:
+            pass
 
     init_db(tmp_db)
     today = date.today()
@@ -148,12 +153,15 @@ def seed_database(target_db_path: Path = DB_PATH) -> None:
                     db_path=tmp_db,
                 )
 
+    if target_db_path.parent:
+        target_db_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(tmp_db, target_db_path)
+    return target_db_path
 
 
 if __name__ == "__main__":
-    seed_database()
-    tmp_check = Path("/tmp/aso_seed_work.db")
+    db_file = seed_database()
+    tmp_check = Path(tempfile.gettempdir()) / "aso_seed_work.db"
     rows = get_keyword_dashboard_rows("6809107174", "CN", db_path=tmp_check)
     assert len(rows) == 9, f"Expected 9 keywords for 6809107174, got {len(rows)}"
     assert parse_app_id("id6809107174") == "6809107174"
