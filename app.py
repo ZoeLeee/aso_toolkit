@@ -14,6 +14,7 @@ from apple_api import (
     DEFAULT_RATE_LIMIT_SECONDS,
     STOREFRONT_MAP,
     batch_update_keywords_with_rate_limit,
+    extract_app_info_from_input,
     fetch_app_Metadata,
     fetch_search_hints,
     parse_app_id,
@@ -23,12 +24,14 @@ from db import (
     add_keyword,
     add_version_release,
     delete_app,
+    delete_competitor,
     delete_keyword,
     get_keyword_dashboard_rows,
     get_keyword_trend,
     init_db,
     list_competitors,
     list_own_apps,
+    list_own_apps_with_stats,
     list_version_releases,
     save_rank_snapshot,
     upsert_app,
@@ -44,10 +47,11 @@ st.set_page_config(
 init_db()
 
 # 侧边栏：我方应用与国家/地区切换
+# 侧边栏：我方应用与国家/地区切换
 st.sidebar.title("📈 ASO 监控工作台")
 st.sidebar.caption("V1.0 正式版 · 零成本个人独立开发版")
 
-own_apps = list_own_apps()
+own_apps = list_own_apps_with_stats()
 app_options = {f"{a['name']} ({a['country']}) - {a['app_id']}": a for a in own_apps}
 option_labels = list(app_options.keys())
 
@@ -75,10 +79,58 @@ if option_labels:
         f"**App ID:** `id{selected_app['app_id']}`  \n"
         f"**Storefront:** `{selected_app['country']}` (`{STOREFRONT_MAP.get(selected_app['country'], '')}`)  \n"
         f"**当前版本:** `{selected_app.get('version') or '-'}`  \n"
-        f"**当前评分:** ⭐ {selected_app['rating']} ({selected_app['rating_count']:,} 条评论)"
+        f"**当前评分:** ⭐ {selected_app['rating']} ({selected_app['rating_count']:,} 条评论)  \n"
+        f"**数据规模:** 🔑 `{selected_app.get('keyword_count', 0)}` 个词 · ⚔️ `{selected_app.get('competitor_count', 0)}` 款竞品"
     )
 else:
-    st.sidebar.info("请先在「模块 1：应用与竞品管理」中添加您的第一款 App。")
+    st.sidebar.info("💡 暂无监控应用，请点击下方或前往「模块 1」添加您的第一款 App。")
+
+# 侧边栏全局快捷添加应用弹窗 (无论在哪个 Tab 都能一秒添加)
+with st.sidebar.popover("➕ 快捷添加 App", use_container_width=True):
+    st.markdown("##### ➕ 快捷添加监控 App")
+    st.caption("支持输入纯数字 ID、带 id 前缀、或 App Store 链接")
+    quick_input = st.text_input(
+        "App ID 或链接",
+        key="quick_app_input",
+        placeholder="例如 6809107174 或粘贴 App Store 链接",
+    )
+    quick_info = extract_app_info_from_input(quick_input)
+    default_q_country_idx = 0
+    if quick_info.get("country") and quick_info["country"] in STOREFRONT_MAP:
+        default_q_country_idx = list(STOREFRONT_MAP.keys()).index(quick_info["country"])
+        st.caption(f"✨ 检测到地区：`{quick_info['country']}`")
+
+    quick_country = st.selectbox(
+        "国家/地区 (Storefront)",
+        list(STOREFRONT_MAP.keys()),
+        index=default_q_country_idx,
+        key="quick_country_select",
+    )
+    if st.button("🚀 识别并立即添加", type="primary", key="quick_add_btn", use_container_width=True):
+        if not quick_input.strip():
+            st.error("请输入有效的 App ID 或链接")
+        else:
+            try:
+                meta = fetch_app_Metadata(quick_input, quick_country)
+                if meta:
+                    upsert_app(
+                        app_id=meta["app_id"],
+                        name=meta["name"],
+                        country=quick_country,
+                        is_own_app=True,
+                        subtitle=meta["subtitle"],
+                        icon_url=meta["icon_url"],
+                        rating=meta["rating"],
+                        rating_count=meta["rating_count"],
+                        version=meta.get("version", ""),
+                    )
+                    st.session_state["active_app_id"] = meta["app_id"]
+                    st.toast(f"成功添加并切换至：{meta['name']}")
+                    st.rerun()
+                else:
+                    st.warning("Lookup 接口未返回结果，请检查 App ID 在所选地区是否已上架。")
+            except Exception as exc:
+                st.error(f"拉取失败: {exc}")
 
 tab1, tab2, tab3, tab4 = st.tabs(
     [
@@ -93,74 +145,284 @@ tab1, tab2, tab3, tab4 = st.tabs(
 # 模块 1：应用与竞品管理
 # ==============================================================================
 with tab4:
-    st.subheader("模块 1：应用与竞品管理 (App Management)")
-    col_add, col_comp = st.columns(2)
+    st.subheader("📱 模块 1：应用与竞品管理 (App Management)")
+    st.caption("支持通过 App ID、带 id 前缀或完整 App Store 链接添加应用，集中管理已监控应用、关联竞品及安全删除。")
 
-    with col_add:
+    sub_tab_add, sub_tab_manage, sub_tab_comp = st.tabs(
+        [
+            "➕ 添加监控应用 (Add App)",
+            f"📋 已监控应用列表与删除管理 ({len(own_apps)})",
+            "⚔️ 竞品关联管理 (Competitors)",
+        ]
+    )
+
+    # --------------------------------------------------------------------------
+    # 子 Tab 1：添加监控应用
+    # --------------------------------------------------------------------------
+    with sub_tab_add:
         st.markdown("#### ➕ 添加我方监控 App (P0)")
+        st.caption("输入纯数字 ID（如 `6809107174`）、带 id 前缀（如 `id6809107174`）或完整 App Store 链接即可一键识别添加。")
+
         app_input = st.text_input(
             "App Store 链接或 App ID (trackId)",
-            value="id6809107174",
-            placeholder="如 id6809107174 或 https://apps.apple.com/cn/app/id6809107174",
-        )
-        country_code = st.selectbox("国家/地区 (Storefront)", list(STOREFRONT_MAP.keys()), index=0)
-        custom_subtitle = st.text_input(
-            "副标题备忘 (选填，若留空自动从标题拆分，用于 100 字符去重)",
-            placeholder="如：儿童宝宝吃药提醒与家庭药箱记录",
+            value="",
+            placeholder="例如 6809107174、id6809107174 或 https://apps.apple.com/cn/app/.../id6809107174",
+            key="tab4_app_input",
+            help="支持自动从链接中识别国家地区",
         )
 
-        if st.button("调用 Lookup 接口拉取并设为当前监控应用", type="primary"):
+        # 智能嗅探链接中的国家代码
+        parsed_info = extract_app_info_from_input(app_input)
+        inferred_cc = parsed_info.get("country")
+        default_cc_idx = 0
+        if inferred_cc and inferred_cc in STOREFRONT_MAP:
+            default_cc_idx = list(STOREFRONT_MAP.keys()).index(inferred_cc)
+            st.info(f"💡 检测到链接中的国家/地区为 **{inferred_cc}**，已自动为您预选。")
+
+        c_col1, c_col2 = st.columns([1, 1])
+        with c_col1:
+            country_code = st.selectbox(
+                "国家/地区 (Storefront)",
+                list(STOREFRONT_MAP.keys()),
+                index=default_cc_idx,
+                key="tab4_country_code",
+            )
+        with c_col2:
+            custom_subtitle = st.text_input(
+                "副标题备忘 (选填，留空自动从线上标题/副标题提取)",
+                placeholder="例如：儿童宝宝吃药提醒与家庭药箱记录",
+                key="tab4_custom_sub",
+            )
+
+        btn_c1, btn_c2 = st.columns([1, 1])
+        with btn_c1:
+            do_preview = st.button("🔍 识别并预览应用详情", type="primary", use_container_width=True)
+        with btn_c2:
+            do_direct_add = st.button("⚡ 直接添加并设为当前监控", use_container_width=True)
+
+        if do_preview:
             if not app_input.strip():
-                st.error("请输入有效的 App ID 或链接")
+                st.error("请输入有效的 App ID 或 App Store 链接")
             else:
-                try:
-                    meta = fetch_app_Metadata(app_input, country_code)
-                    if meta:
-                        upsert_app(
-                            app_id=meta["app_id"],
-                            name=meta["name"],
-                            country=country_code,
-                            is_own_app=True,
-                            subtitle=custom_subtitle.strip() or meta["subtitle"],
-                            icon_url=meta["icon_url"],
-                            rating=meta["rating"],
-                            rating_count=meta["rating_count"],
-                            version=meta["version"],
-                        )
-                        st.session_state["active_app_id"] = meta["app_id"]
-                        st.success(
-                            f"成功绑定并切换至：{meta['name']} (id{meta['app_id']}, {country_code}) · 版本 v{meta['version']}"
-                        )
-                        st.rerun()
+                with st.spinner("正在请求 Apple Lookup 接口抓取应用元数据..."):
+                    try:
+                        meta = fetch_app_Metadata(app_input, country_code)
+                        if meta:
+                            st.session_state["tab4_preview_app"] = meta
+                        else:
+                            st.warning(f"Lookup 未查找到该应用，请检查该 App 在「{country_code}」区是否已正式上架。")
+                    except Exception as exc:
+                        st.error(f"拉取失败: {exc}")
+
+        # 显示识别预览卡片
+        if "tab4_preview_app" in st.session_state:
+            meta = st.session_state["tab4_preview_app"]
+            st.markdown("---")
+            st.markdown("##### 📱 应用识别预览")
+            with st.container(border=True):
+                p_c1, p_c2 = st.columns([1, 4])
+                with p_c1:
+                    if meta.get("icon_url"):
+                        st.image(meta["icon_url"], width=84)
                     else:
-                        st.warning("Lookup 接口未返回结果，请检查 App ID 在所选国家/地区是否已上架。")
-                except Exception as exc:
-                    st.error(f"拉取失败: {exc}")
+                        st.markdown("📱")
+                with p_c2:
+                    st.markdown(f"#### {meta['name']}")
+                    st.markdown(f"**副标题/分类:** `{meta['subtitle']}` · **分类:** `{meta.get('genre', '-')}`")
+                    st.markdown(
+                        f"**App ID:** `id{meta['app_id']}` · **地区:** `{meta['country']}` · **当前版本:** `v{meta.get('version', '-')}`"
+                    )
+                    st.markdown(f"**用户评分:** ⭐ `{meta['rating']}` 分 · 💬 `{meta['rating_count']:,}` 条用户评论")
+                    if meta.get("seller"):
+                        st.caption(f"开发者: {meta['seller']}")
 
-        if selected_app:
-            st.divider()
-            st.markdown("#### 🗑️ 管理已绑定应用")
-            if st.button(f"删除当前应用「{selected_app['name']} ({selected_app['country']})」及其词库"):
-                delete_app(selected_app["app_id"], selected_app["country"])
-                st.session_state.pop("active_app_id", None)
-                st.success("已删除该应用及其关联数据。")
-                st.rerun()
+                if st.button("✅ 确认添加此应用为监控 App 并立即切换", type="primary", use_container_width=True, key="confirm_preview_add"):
+                    upsert_app(
+                        app_id=meta["app_id"],
+                        name=meta["name"],
+                        country=meta["country"],
+                        is_own_app=True,
+                        subtitle=custom_subtitle.strip() or meta["subtitle"],
+                        icon_url=meta["icon_url"],
+                        rating=meta["rating"],
+                        rating_count=meta["rating_count"],
+                        version=meta.get("version", ""),
+                    )
+                    st.session_state["active_app_id"] = meta["app_id"]
+                    st.session_state.pop("tab4_preview_app", None)
+                    st.toast(f"成功添加并切换监控应用：{meta['name']}")
+                    st.rerun()
 
-    with col_comp:
+        if do_direct_add:
+            if not app_input.strip():
+                st.error("请输入有效的 App ID 或 App Store 链接")
+            else:
+                with st.spinner("正在请求 Apple 接口并添加入库..."):
+                    try:
+                        meta = fetch_app_Metadata(app_input, country_code)
+                        if meta:
+                            upsert_app(
+                                app_id=meta["app_id"],
+                                name=meta["name"],
+                                country=country_code,
+                                is_own_app=True,
+                                subtitle=custom_subtitle.strip() or meta["subtitle"],
+                                icon_url=meta["icon_url"],
+                                rating=meta["rating"],
+                                rating_count=meta["rating_count"],
+                                version=meta.get("version", ""),
+                            )
+                            st.session_state["active_app_id"] = meta["app_id"]
+                            st.toast(f"成功添加并切换监控应用：{meta['name']}")
+                            st.rerun()
+                        else:
+                            st.warning(f"Lookup 接口未返回结果，请检查 App ID 在所选国家/地区是否已上架。")
+                    except Exception as exc:
+                        st.error(f"添加失败: {exc}")
+
+        # 手动录入兜底面板
+        with st.expander("🛠️ 接口受限或需录入未上架/内测应用？点击手动添加"):
+            st.caption("如因海外商店未公开或测试网络无法访问 Apple Lookup，可手动直接创建应用：")
+            m_col1, m_col2 = st.columns(2)
+            with m_col1:
+                man_id = st.text_input("App ID (纯数字)", placeholder="例如 6809107174", key="man_id")
+                man_name = st.text_input("应用全名", placeholder="例如 喂药本 - 家庭用药管理", key="man_name")
+            with m_col2:
+                man_cc = st.selectbox("地区代码", list(STOREFRONT_MAP.keys()), key="man_cc")
+                man_sub = st.text_input("副标题", placeholder="例如 家庭用药管理", key="man_sub")
+            if st.button("手动保存并加入监控", key="man_save_btn"):
+                if not man_id.strip() or not man_name.strip():
+                    st.error("请至少输入有效的 App ID 与应用全名")
+                else:
+                    clean_man_id = parse_app_id(man_id.strip())
+                    upsert_app(
+                        app_id=clean_man_id,
+                        name=man_name.strip(),
+                        country=man_cc,
+                        is_own_app=True,
+                        subtitle=man_sub.strip(),
+                    )
+                    st.session_state["active_app_id"] = clean_man_id
+                    st.toast(f"手动添加成功：{man_name.strip()}")
+                    st.rerun()
+
+    # --------------------------------------------------------------------------
+    # 子 Tab 2：已监控应用列表与删除管理
+    # --------------------------------------------------------------------------
+    with sub_tab_manage:
+        st.markdown(f"#### 📋 已监控应用列表（共监控 **{len(own_apps)}** 款应用）")
+        st.caption("在此集中查看所有已监控应用的数据概况，支持一键切换当前工作台焦点或彻底删除应用及关联词库。")
+
+        if not own_apps:
+            st.info("💡 当前暂无任何监控应用，请在「➕ 添加监控应用」子标签中添加您的第一款 App。")
+        else:
+            for app in own_apps:
+                is_active = (
+                    selected_app is not None
+                    and app["app_id"] == selected_app["app_id"]
+                    and app["country"] == selected_app["country"]
+                )
+                with st.container(border=True):
+                    c_icon, c_info, c_action = st.columns([1, 4, 2])
+                    with c_icon:
+                        if app.get("icon_url"):
+                            st.image(app["icon_url"], width=68)
+                        else:
+                            st.markdown("📱")
+                    with c_info:
+                        title_prefix = "🌟 **[当前监控]** " if is_active else ""
+                        st.markdown(f"{title_prefix}**{app['name']}**")
+                        st.caption(
+                            f"**App ID:** `id{app['app_id']}` · **地区:** `{app['country']}` · **版本:** `v{app.get('version') or '-'}` · "
+                            f"**评分:** ⭐ {app['rating']} ({app['rating_count']:,} 评价)"
+                        )
+                        st.markdown(
+                            f"📊 **数据规模：** 🔑 监控词数 `{app.get('keyword_count', 0)}` 个 ｜ ⚔️ 关联竞品 `{app.get('competitor_count', 0)}` 款"
+                        )
+                    with c_action:
+                        if not is_active:
+                            if st.button(
+                                "📌 设为当前",
+                                key=f"set_active_{app['app_id']}_{app['country']}",
+                                use_container_width=True,
+                            ):
+                                st.session_state["active_app_id"] = app["app_id"]
+                                st.toast(f"已切换当前监控应用为：{app['name']}")
+                                st.rerun()
+                        else:
+                            st.button("✅ 正在监控中", disabled=True, use_container_width=True, key=f"btn_act_{app['app_id']}")
+
+                        # 删除应用 (使用 Popover 进行防误触二次确认)
+                        with st.popover("🗑️ 删除此 App", use_container_width=True):
+                            st.warning(f"⚠️ 确认彻底删除应用「{app['name']}」？")
+                            st.caption(
+                                f"此操作将同时**永久清空**关联的 {app.get('keyword_count', 0)} 个关键词及历史排名快照、"
+                                f"{app.get('competitor_count', 0)} 款关联竞品，不可恢复！"
+                            )
+                            if st.button(
+                                "🔥 确认永久删除",
+                                type="primary",
+                                key=f"confirm_del_{app['app_id']}_{app['country']}",
+                                use_container_width=True,
+                            ):
+                                delete_app(app["app_id"], app["country"])
+                                if is_active:
+                                    st.session_state.pop("active_app_id", None)
+                                st.toast(f"已彻底删除应用「{app['name']}」及所有关联数据")
+                                st.rerun()
+
+    # --------------------------------------------------------------------------
+    # 子 Tab 3：竞品关联管理
+    # --------------------------------------------------------------------------
+    with sub_tab_comp:
         st.markdown("#### ⚔️ 竞品关联绑定 (P1 · 单应用支持绑定 3~5 个竞品)")
         if not selected_app:
-            st.info("请先添加并选择一款我方 App")
+            st.info("请先在上方或侧边栏选择一款我方监控 App。")
         else:
             comps = list_competitors(selected_app["app_id"], selected_app["country"])
             st.caption(
                 f"当前已为 **{selected_app['name']} ({selected_app['country']})** 绑定 {len(comps)}/5 款核心竞品（查词时单次请求顺便记录竞品排名）："
             )
-            for c in comps:
-                st.markdown(f"- **{c['name']}** (`id{c['app_id']}`) · ⭐ {c['rating']} · 评论 {c['rating_count']:,}")
 
-            comp_input = st.text_input("输入竞品 App ID 或链接", key="comp_in", placeholder="如 id1439876541")
-            if st.button("绑定关联竞品"):
-                if len(comps) >= 5:
+            if comps:
+                for c in comps:
+                    with st.container(border=True):
+                        c1, c2, c3 = st.columns([1, 4, 1.5])
+                        with c1:
+                            if c.get("icon_url"):
+                                st.image(c["icon_url"], width=48)
+                            else:
+                                st.markdown("⚔️")
+                        with c2:
+                            st.markdown(f"**{c['name']}** (`id{c['app_id']}`)")
+                            st.caption(
+                                f"⭐ {c['rating']} · 评论 {c['rating_count']:,} · 版本 `{c.get('version') or '-'}`"
+                            )
+                        with c3:
+                            with st.popover("🗑️ 移除", use_container_width=True):
+                                st.caption(f"确认解除与竞品「{c['name']}」的绑定？")
+                                if st.button(
+                                    "确认移除",
+                                    type="primary",
+                                    key=f"del_comp_{c['app_id']}_{selected_app['app_id']}",
+                                    use_container_width=True,
+                                ):
+                                    delete_competitor(selected_app["app_id"], c["app_id"], selected_app["country"])
+                                    st.toast(f"已移除竞品：{c['name']}")
+                                    st.rerun()
+            else:
+                st.info("当前尚未绑定竞品应用，您可以在下方添加 3~5 款同类竞品。")
+
+            st.markdown("##### ➕ 添加关联竞品")
+            comp_input = st.text_input(
+                "输入竞品 App ID 或链接",
+                key="comp_in",
+                placeholder="例如 id1439876541 或粘贴竞品 App Store 链接",
+            )
+            if st.button("绑定关联竞品", type="primary"):
+                if not comp_input.strip():
+                    st.error("请输入有效的竞品 ID 或链接")
+                elif len(comps) >= 5:
                     st.warning("每个应用最多建议绑定 5 个核心竞品。")
                 else:
                     try:
@@ -176,14 +438,15 @@ with tab4:
                                 icon_url=cmeta["icon_url"],
                                 rating=cmeta["rating"],
                                 rating_count=cmeta["rating_count"],
-                                version=cmeta["version"],
+                                version=cmeta.get("version", ""),
                             )
-                            st.success(f"已绑定竞品：{cmeta['name']}")
+                            st.toast(f"已成功绑定竞品：{cmeta['name']}")
                             st.rerun()
                         else:
-                            st.warning("未查到该竞品 App ID，请确认国家/地区是否一致。")
+                            st.warning(f"未查到该竞品 App ID，请确认国家/地区是否与当前监控应用一致 ({selected_app['country']})。")
                     except Exception as exc:
                         st.error(f"绑定竞品失败: {exc}")
+
 
 # ==============================================================================
 # 模块 2：关键词排名追踪与趋势看板

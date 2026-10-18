@@ -33,20 +33,59 @@ STOREFRONT_MAP: Dict[str, str] = {
 DEFAULT_RATE_LIMIT_SECONDS = 3.5
 
 
+def extract_app_info_from_input(input_str: str) -> Dict[str, Optional[str]]:
+    """
+    智能解析用户输入内容（纯数字 ID、带 id 前缀、完整 App Store / iTunes 链接）。
+    返回字典包含:
+      - 'app_id': 解析到的 trackId (str 或 None)
+      - 'country': 从链接路径推断出的国家代码 (如 'CN', 'US', 'JP' 或 None)
+    """
+    cleaned = (input_str or "").strip()
+    result: Dict[str, Optional[str]] = {"app_id": None, "country": None}
+    if not cleaned:
+        return result
+
+    # 1. 尝试从 URL 中嗅探国家代码 (例如: apps.apple.com/cn/app/... 或 itunes.apple.com/us/...)
+    country_match = re.search(r"(?:apps|itunes)\.apple\.com/([a-zA-Z]{2})/", cleaned)
+    if country_match:
+        inferred_country = country_match.group(1).upper()
+        if inferred_country in STOREFRONT_MAP or len(inferred_country) == 2:
+            result["country"] = inferred_country
+
+    # 2. 尝试从 query 参数中提取 id (如 ?id=6809107174)
+    query_match = re.search(r"[?&]id=(\d{6,15})", cleaned)
+    if query_match:
+        result["app_id"] = query_match.group(1)
+        return result
+
+    # 3. 尝试匹配 id + 6~15位数字 (如 id6809107174 或 /id6809107174)
+    id_match = re.search(r"id(\d{6,15})", cleaned, re.IGNORECASE)
+    if id_match:
+        result["app_id"] = id_match.group(1)
+        return result
+
+    # 4. 如果是纯数字
+    if cleaned.isdigit():
+        result["app_id"] = cleaned
+        return result
+
+    # 5. 回退提取字符串中的长数字串
+    digits = re.findall(r"\d{6,15}", cleaned)
+    if digits:
+        result["app_id"] = digits[0]
+        return result
+
+    return result
+
+
 def parse_app_id(input_str: str) -> str:
     """
     支持直接输入纯数字 trackId (如 '6809107174')、带 id 前缀 ('id6809107174')
     或完整 App Store 链接 ('https://apps.apple.com/cn/app/xxx/id6809107174')
     """
-    cleaned = (input_str or "").strip()
-    if cleaned.isdigit():
-        return cleaned
-    match = re.search(r"id(\d{6,15})", cleaned, re.IGNORECASE)
-    if match:
-        return match.group(1)
-    digits = re.findall(r"\d{6,15}", cleaned)
-    if digits:
-        return digits[0]
+    info = extract_app_info_from_input(input_str)
+    if info.get("app_id"):
+        return str(info["app_id"])
     raise ValueError(f"无法从输入 '{input_str}' 中解析有效的 App ID (trackId)")
 
 

@@ -145,6 +145,22 @@ def list_own_apps(db_path: Path = DB_PATH) -> List[Dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+def list_own_apps_with_stats(db_path: Path = DB_PATH) -> List[Dict[str, Any]]:
+    """获取所有监控的我方应用，并统计关联的关键词数和竞品数"""
+    conn = get_conn(db_path)
+    rows = conn.execute("""
+        SELECT 
+            a.*,
+            (SELECT COUNT(*) FROM keywords k WHERE k.app_id = a.app_id AND k.country = a.country) as keyword_count,
+            (SELECT COUNT(*) FROM apps c WHERE c.parent_app_id = a.app_id AND c.country = a.country) as competitor_count
+        FROM apps a
+        WHERE a.is_own_app = 1
+        ORDER BY a.created_at DESC
+    """).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 def list_competitors(parent_app_id: str, country: str, db_path: Path = DB_PATH) -> List[Dict[str, Any]]:
     conn = get_conn(db_path)
     rows = conn.execute(
@@ -368,7 +384,7 @@ def list_version_releases(app_id: str, country: str, db_path: Path = DB_PATH) ->
 
 
 def delete_app(app_id: str, country: str, db_path: Path = DB_PATH) -> None:
-    """删除指定监控应用及其关联词库与历史快照"""
+    """删除指定监控应用及其关联词库、历史快照与绑定竞品"""
     conn = get_conn(db_path)
     cc = country.upper()
     kw_ids = [
@@ -379,9 +395,23 @@ def delete_app(app_id: str, country: str, db_path: Path = DB_PATH) -> None:
     ]
     for kid in kw_ids:
         conn.execute("DELETE FROM rank_history WHERE keyword_id = ?", (kid,))
+    conn.execute("DELETE FROM rank_history WHERE app_id = ?", (str(app_id),))
     conn.execute("DELETE FROM keywords WHERE app_id = ? AND country = ?", (str(app_id), cc))
     conn.execute("DELETE FROM version_releases WHERE app_id = ? AND country = ?", (str(app_id), cc))
     conn.execute("DELETE FROM apps WHERE parent_app_id = ? AND country = ?", (str(app_id), cc))
     conn.execute("DELETE FROM apps WHERE app_id = ? AND country = ?", (str(app_id), cc))
+    conn.commit()
+    conn.close()
+
+
+def delete_competitor(parent_app_id: str, comp_app_id: str, country: str, db_path: Path = DB_PATH) -> None:
+    """解除/删除指定的竞品关联应用"""
+    conn = get_conn(db_path)
+    cc = country.upper()
+    conn.execute(
+        "DELETE FROM apps WHERE app_id = ? AND parent_app_id = ? AND country = ?",
+        (str(comp_app_id), str(parent_app_id), cc),
+    )
+    conn.execute("DELETE FROM rank_history WHERE app_id = ?", (str(comp_app_id),))
     conn.commit()
     conn.close()
