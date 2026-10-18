@@ -415,3 +415,77 @@ def delete_competitor(parent_app_id: str, comp_app_id: str, country: str, db_pat
     conn.execute("DELETE FROM rank_history WHERE app_id = ?", (str(comp_app_id),))
     conn.commit()
     conn.close()
+
+
+def ensure_ai_recommendations_table(db_path: Path = DB_PATH) -> None:
+    conn = get_conn(db_path)
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS ai_recommendations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        app_id VARCHAR(32) NOT NULL,
+        country VARCHAR(8) NOT NULL,
+        engine_mode VARCHAR(64) NOT NULL,
+        recommended_title TEXT NOT NULL,
+        recommended_subtitle TEXT NOT NULL,
+        recommended_keywords TEXT NOT NULL,
+        summary_report TEXT DEFAULT '',
+        full_json TEXT DEFAULT '',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    """)
+    conn.commit()
+    conn.close()
+
+
+def save_ai_recommendation(
+    app_id: str,
+    country: str,
+    engine_mode: str,
+    recommended_title: str,
+    recommended_subtitle: str,
+    recommended_keywords: str,
+    summary_report: str = "",
+    full_json: str = "",
+    db_path: Path = DB_PATH,
+) -> int:
+    ensure_ai_recommendations_table(db_path)
+    conn = get_conn(db_path)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO ai_recommendations (
+            app_id, country, engine_mode, recommended_title,
+            recommended_subtitle, recommended_keywords, summary_report, full_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            str(app_id),
+            country.upper(),
+            engine_mode,
+            recommended_title,
+            recommended_subtitle,
+            recommended_keywords,
+            summary_report,
+            full_json,
+        ),
+    )
+    rec_id = int(cur.lastrowid or 0)
+    conn.commit()
+    conn.close()
+    return rec_id
+
+
+def list_ai_recommendations(app_id: str, country: str, limit: int = 10, db_path: Path = DB_PATH) -> List[Dict[str, Any]]:
+    ensure_ai_recommendations_table(db_path)
+    conn = get_conn(db_path)
+    rows = conn.execute(
+        """
+        SELECT * FROM ai_recommendations
+        WHERE app_id = ? AND country = ?
+        ORDER BY id DESC LIMIT ?
+        """,
+        (str(app_id), country.upper(), limit),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]

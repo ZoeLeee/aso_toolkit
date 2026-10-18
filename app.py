@@ -37,6 +37,15 @@ from db import (
     upsert_app,
 )
 from optimizer import analyze_100_char_workspace
+from ai_agent import (
+    build_agent_prompt_text,
+    generate_aso_recommendations_local,
+    run_llm_aso_agent,
+)
+from db import (
+    list_ai_recommendations,
+    save_ai_recommendation,
+)
 
 st.set_page_config(
     page_title="个人轻量级 ASO 监控与优化工作台",
@@ -132,12 +141,13 @@ with st.sidebar.popover("➕ 快捷添加 App", use_container_width=True):
             except Exception as exc:
                 st.error(f"拉取失败: {exc}")
 
-tab1, tab2, tab3, tab4 = st.tabs(
+tab1, tab2, tab3, tab4, tab5 = st.tabs(
     [
         "📱 模块 1：应用与竞品管理",
         "📊 模块 2：关键词排名看板",
         "🔍 模块 3：拓词挖掘与难度评估",
         "✂️ 模块 4：100 字符去重工作台",
+        "🤖 模块 5：AI 决策推荐 Agent",
     ]
 )
 
@@ -738,11 +748,15 @@ with tab4:
             else "宝宝儿童喂药记录与吃药定时提醒助手"
         )
 
-    in_title = st.text_input("应用标题 (App Store Connect 限制 30 字符)", value=selected_app["name"] if selected_app else default_title)
-    in_sub = st.text_input("应用副标题 (App Store Connect 限制 30 字符)", value=default_sub)
+    synced_title = st.session_state.get("ai_synced_title") or (selected_app["name"] if selected_app else default_title)
+    synced_sub = st.session_state.get("ai_synced_sub") or default_sub
+    synced_kws = st.session_state.get("ai_synced_kws") or "喂药本，喂药记录，家庭用药，吃药提醒，宝宝喂药，家庭药箱，服药打卡，儿童用药，药品过期，退烧药，抗生素，慢病管理，处方记录，看病记录，疫苗本，身高体重，体温计，儿科，健康档案"
+
+    in_title = st.text_input("应用标题 (App Store Connect 限制 30 字符)", value=synced_title)
+    in_sub = st.text_input("应用副标题 (App Store Connect 限制 30 字符)", value=synced_sub)
     in_kws = st.text_area(
         "100 字符关键词栏（支持粘贴中文逗号 `，`、空格或换行，自动清洗并检测与标题/副标题重复词）",
-        value="喂药本，喂药记录，家庭用药，吃药提醒，宝宝喂药，家庭药箱，服药打卡，儿童用药，药品过期，退烧药，抗生素，慢病管理，处方记录，看病记录，疫苗本，身高体重，体温计，儿科，健康档案",
+        value=synced_kws,
         height=110,
     )
     auto_strip = st.checkbox("自动剔除已在「标题」或「副标题」中出现过的冗余词（省出宝贵字符额度）", value=True)
@@ -769,3 +783,202 @@ with tab4:
 
     st.markdown("#### ✅ 清洗后可直接粘贴至 App Store Connect 的 100 字符结果：")
     st.code(analysis["keywords"]["active_str"], language="text")
+
+
+# ==============================================================================
+# 模块 5：AI ASO 智能分析与最终元数据推荐 Agent
+# ==============================================================================
+with tab5:
+    st.subheader("🤖 模块 5：AI ASO 智能决策与推荐中心 (AI Recommendation Agent)")
+    st.caption(
+        "综合平台积累的关键词搜索热度、竞争难度、近 30 天排名爬升斜率、竞品同词差距及标题覆盖率，为您输出下一版本可直接提审的【最终推荐标题 + 副标题 + 100 字符关键词】。"
+    )
+
+    if not selected_app:
+        st.info("请先在「模块 1」或左侧边栏选择一款监控 App。")
+    else:
+        ai_app_id = selected_app["app_id"]
+        ai_country = selected_app["country"]
+        ai_kw_rows = get_keyword_dashboard_rows(ai_app_id, ai_country)
+        ai_comps = list_competitors(ai_app_id, ai_country)
+        ai_releases = list_version_releases(ai_app_id, ai_country)
+        ai_trend_map = {
+            r["id"]: get_keyword_trend(r["id"], ai_app_id, days=30) for r in ai_kw_rows
+        }
+
+        with st.container(border=True):
+            cfg_c1, cfg_c2 = st.columns([2, 2])
+            with cfg_c1:
+                engine_choice = st.radio(
+                    "选择 AI 推理引擎模式",
+                    [
+                        "⚡ 内置量化策略 AI Agent (零成本 · 免 Key 毫秒级生成)",
+                        "🧠 外部大模型 LLM Agent (OpenAI / DeepSeek / 通义千问兼容 API)",
+                    ],
+                    horizontal=False,
+                )
+                custom_focus_input = st.text_input(
+                    "本次发版业务侧重点 / 补充种子词（选填）",
+                    placeholder="例如：主攻宝妈人群、儿童发烧喂药场景，新增『退烧药,疫苗本』",
+                )
+            with cfg_c2:
+                if engine_choice.startswith("🧠"):
+                    llm_base_url = st.text_input(
+                        "API Base URL",
+                        value="https://api.deepseek.com/v1",
+                        placeholder="如 https://api.openai.com/v1 或 https://api.deepseek.com/v1",
+                    )
+                    llm_model = st.text_input("模型名称 (Model)", value="deepseek-chat")
+                    llm_api_key = st.text_input("API Key", type="password", placeholder="sk-...")
+                else:
+                    llm_base_url, llm_model, llm_api_key = "", "", ""
+                    st.info(
+                        "💡 **内置量化策略引擎**直接基于 SQLite 中积累的 `rank_history` 趋势斜率、搜索热度、竞争难度与竞品差集计算每个词的 **ASO ROI 得分**，并按单字价值密度自动完成 30/30/100 字符最优装箱。"
+                    )
+
+            run_agent_btn = st.button(
+                "🚀 基于平台积累数据生成最终 ASO 推荐方案",
+                type="primary",
+                use_container_width=True,
+            )
+
+        state_key = f"ai_report_{ai_app_id}_{ai_country}"
+        if run_agent_btn or state_key not in st.session_state:
+            with st.spinner("🤖 AI Agent 正在深度分析历史排名趋势、竞品差集与字符权重分布..."):
+                if engine_choice.startswith("🧠") and llm_api_key.strip():
+                    report = run_llm_aso_agent(
+                        app_info=selected_app,
+                        keyword_rows=ai_kw_rows,
+                        competitors=ai_comps,
+                        releases=ai_releases,
+                        trend_map=ai_trend_map,
+                        api_key=llm_api_key,
+                        base_url=llm_base_url,
+                        model_name=llm_model,
+                        custom_focus=custom_focus_input,
+                    )
+                else:
+                    report = generate_aso_recommendations_local(
+                        app_info=selected_app,
+                        keyword_rows=ai_kw_rows,
+                        competitors=ai_comps,
+                        releases=ai_releases,
+                        trend_map=ai_trend_map,
+                        custom_focus=custom_focus_input,
+                    )
+                st.session_state[state_key] = report
+                if run_agent_btn and report.get("proposals"):
+                    best_p = report["proposals"][0]
+                    save_ai_recommendation(
+                        app_id=ai_app_id,
+                        country=ai_country,
+                        engine_mode=report["engine"],
+                        recommended_title=best_p["title"],
+                        recommended_subtitle=best_p["subtitle"],
+                        recommended_keywords=best_p["keywords"],
+                        summary_report="\n".join(report.get("diagnosis_bullets", [])),
+                        full_json=pd.io.json.dumps(report),
+                    )
+                    st.toast("✅ 已生成最新 ASO 推荐方案并存入历史记录！")
+
+        report = st.session_state[state_key]
+
+        # 1. 核心数据诊断洞察
+        st.markdown(f"#### 🔍 一、平台积累数据全局诊断 (`{report['engine']}`)")
+        with st.container(border=True):
+            for bullet in report.get("diagnosis_bullets", []):
+                st.markdown(f"- {bullet}")
+
+        # 2. 三大可直接发布的最终元数据方案
+        st.markdown("#### 🏆 二、最终推荐 ASO 元数据方案（可直接复制提审或同步至工作台）")
+        proposals = report.get("proposals", [])
+        if proposals:
+            p_tabs = st.tabs([p["scheme_name"] for p in proposals])
+            for idx, (ptab, prop) in enumerate(zip(p_tabs, proposals)):
+                with ptab:
+                    st.caption(f"💡 **策略逻辑：** {prop['strategy_summary']}")
+                    mc1, mc2, mc3 = st.columns(3)
+                    mc1.metric(
+                        "1. 推荐主标题 (限 30 字符)",
+                        f"{prop['title_len']} / 30 字符",
+                        f"剩余 {prop['title_remaining']} 字符",
+                    )
+                    mc2.metric(
+                        "2. 推荐副标题 (限 30 字符)",
+                        f"{prop['subtitle_len']} / 30 字符",
+                        f"剩余 {prop['subtitle_remaining']} 字符",
+                    )
+                    mc3.metric(
+                        "3. 推荐 100 字符栏 (零重复)",
+                        f"{prop['keywords_len']} / 100 字符",
+                        f"共覆盖 {prop['keywords_count']} 个独立高优词",
+                    )
+
+                    st.markdown("**📌 推荐应用标题 (Title):**")
+                    st.code(prop["title"], language="text")
+                    st.markdown("**📌 推荐应用副标题 (Subtitle):**")
+                    st.code(prop["subtitle"], language="text")
+                    st.markdown("**📌 推荐 100 字符关键词域 (Keywords · 已自动剔除正副标题重复词):**")
+                    st.code(prop["keywords"], language="text")
+
+                    if st.button(
+                        f"✂️ 一键将「{prop['scheme_name']}」同步至模块 4 工作台微调",
+                        key=f"sync_prop_{idx}_{ai_app_id}",
+                        type="primary",
+                    ):
+                        st.session_state["ai_synced_title"] = prop["title"]
+                        st.session_state["ai_synced_sub"] = prop["subtitle"]
+                        st.session_state["ai_synced_kws"] = prop["keywords"]
+                        st.toast("已同步至「模块 4：100 字符去重工作台」，请点击上方模块 4 标签查看！")
+
+        # 3. 关键词四象限 ROI 评分与推荐归属位置表
+        st.markdown("#### 📊 三、监控词库 ROI 评分与元数据位置分配明细")
+        eval_kws = report.get("evaluated_keywords", [])
+        if eval_kws:
+            df_eval = pd.DataFrame(
+                [
+                    {
+                        "关键词": k["keyword"],
+                        "标签": k["tag"],
+                        "ROI 综合得分": k["roi_score"],
+                        "单字价值密度": k["char_efficiency"],
+                        "热度": k["popularity"],
+                        "难度分": k["difficulty"],
+                        "当前状态": k["position_status"],
+                        "近30天爬升": f"{k['rank_gain_30d']:+d} 名" if k["rank_gain_30d"] else "—",
+                        "竞品博弈": k["comp_insight"],
+                        "AI 推荐归属位置": k["recommended_slot"],
+                        "AI 决策依据": k["action_reason"],
+                    }
+                    for k in eval_kws
+                ]
+            )
+            st.dataframe(df_eval, use_container_width=True, hide_index=True)
+
+        # 4. 高潜同赛道拓词补位建议与 Prompt 导出
+        col_exp, col_prompt = st.columns(2)
+        with col_exp:
+            st.markdown("#### 💡 四、AI 挖掘的同赛道高潜补位词根")
+            st.caption("以下词根竞争度低且与您的应用高度契合，已被 AI 自动用于填满 100 字符剩余空间，您也可以一键加入日常监控：")
+            for item in report.get("expansion_suggestions", []):
+                ec1, ec2, ec3 = st.columns([3, 4, 2])
+                ec1.markdown(f"**{item['keyword']}** (`热度 {item['popularity']}` / `难度 {item['difficulty']}`)")
+                ec2.caption(item["reason"])
+                if ec3.button("➕ 加入监控", key=f"ai_exp_{item['keyword']}_{ai_app_id}"):
+                    add_keyword(ai_app_id, ai_country, item["keyword"], tag="长尾词", popularity=item["popularity"], difficulty=item["difficulty"])
+                    st.toast(f"已将「{item['keyword']}」加入监控词库！")
+                    st.rerun()
+
+        with col_prompt:
+            st.markdown("#### 📋 五、导出数据包 Prompt / 历史推荐记录")
+            prompt_str = build_agent_prompt_text(selected_app, eval_kws, ai_comps, custom_focus_input)
+            with st.expander("查看/复制发往大模型的完整数据 Prompt", expanded=False):
+                st.code(prompt_str, language="markdown")
+
+            hist_recs = list_ai_recommendations(ai_app_id, ai_country, limit=5)
+            if hist_recs:
+                st.caption(f"最近生成的 AI 推荐快照（共 {len(hist_recs)} 条）：")
+                for hr in hist_recs:
+                    st.markdown(
+                        f"- `{hr['created_at']}` (**{hr['engine_mode']}**) → 标题: `{hr['recommended_title']}` | 100字符长度: `{len(hr['recommended_keywords'])}`"
+                    )
