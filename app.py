@@ -7,7 +7,6 @@
 - 支持单独刷新某个关键词、删除单个关键词、或一键清理演示应用数据
 """
 from datetime import date
-import json
 import pandas as pd
 import streamlit as st
 
@@ -878,7 +877,7 @@ with tab5:
                         recommended_subtitle=best_p["subtitle"],
                         recommended_keywords=best_p["keywords"],
                         summary_report="\n".join(report.get("diagnosis_bullets", [])),
-                        full_json=json.dumps(report, ensure_ascii=False),
+                        full_json=pd.io.json.dumps(report),
                     )
                     st.toast("✅ 已生成最新 ASO 推荐方案并存入历史记录！")
 
@@ -959,8 +958,8 @@ with tab5:
         # 4. 高潜同赛道拓词补位建议与 Prompt 导出
         col_exp, col_prompt = st.columns(2)
         with col_exp:
-            st.markdown("#### 💡 四、AI 挖掘的同赛道高潜补位词根")
-            st.caption("以下词根竞争度低且与您的应用高度契合，已被 AI 自动用于填满 100 字符剩余空间，您也可以一键加入日常监控：")
+            st.markdown("#### 💡 四、同赛道高潜候选词参考（灵感库）")
+            st.caption("以下词根仅作为灵感参考，未加入您的 100 字符推荐；点击「➕ 加入监控」后才会进入您的词库并参与后续 ASO 决策与装箱：")
             for item in report.get("expansion_suggestions", []):
                 ec1, ec2, ec3 = st.columns([3, 4, 2])
                 ec1.markdown(f"**{item['keyword']}** (`热度 {item['popularity']}` / `难度 {item['difficulty']}`)")

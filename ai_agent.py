@@ -6,8 +6,9 @@
 最终输出可直接用于 App Store Connect 发版的：
 1. 推荐应用标题 (Title, ≤30 字符)
 2. 推荐应用副标题 (Subtitle, ≤30 字符)
-3. 推荐 100 字符关键词串 (Keywords, ≤100 字符，自动剔除标题/副标题重复词并按 ROI 贪心装箱)
+3. 推荐 100 字符关键词串 (Keywords, ≤100 字符，严格基于用户监控词库去重并按 ROI 贪心装箱，坚决不随意填充无关词根)
 4. 词库四象限分层诊断报告（核心护城河词 / 副标题冲刺词 / 100字符黄金词 / 建议淘汰词）
+5. 垂直领域候选灵感池（仅供参考，不自动填充入 100 字符，开发者自主点击纳入监控）
 """
 import json
 import re
@@ -23,7 +24,7 @@ from optimizer import (
     normalize_keyword_string,
 )
 
-# 垂直领域高转化补词知识库（当监控词库不足以填满 100 字符时，AI Agent 自动按赛道匹配补位词根）
+# 垂直领域高转化候选灵感知识库（仅作为独立灵感参考池展示，绝不自动强行拼入 100 字符）
 DOMAIN_EXPANSION_BANK: Dict[str, List[Dict[str, Any]]] = {
     "medical_family": [
         {"keyword": "退烧药", "popularity": 56, "difficulty": 21.0, "reason": "儿童发烧高频场景词，竞争度低"},
@@ -118,66 +119,67 @@ def evaluate_keyword_aso_value(
     if today_rank is not None and today_rank <= 3:
         momentum_score = 22.0
         position_status = f"🏆 霸榜护城河 (#{today_rank})"
-    elif today_rank is not None and 4 <= today_rank <= 15:
-        momentum_score = 26.0  # 临门一脚冲刺 Top 3 的黄金卡位词！
-        position_status = f"🚀 冲刺前3黄金位 (#{today_rank})"
-    elif today_rank is not None and 16 <= today_rank <= 50:
+    elif today_rank is not None and today_rank <= 15:
+        # 4~15 名是“临门一脚”黄金冲刺区
+        momentum_score = 26.0
+        position_status = f"🚀 冲刺 Top 3 (#{today_rank})"
+    elif today_rank is not None and today_rank <= 50:
         momentum_score = 18.0
-        position_status = f"📈 潜力爬升区 (#{today_rank})"
-    elif today_rank is not None and 51 <= today_rank <= 200:
+        position_status = f"📈 潜力卡位 (#{today_rank})"
+    elif today_rank is not None and today_rank <= 200:
         momentum_score = 10.0
-        position_status = f"🌱 入榜培育区 (#{today_rank})"
+        position_status = f"👀 200内浮动 (#{today_rank})"
     else:
-        if diff >= 65:
+        # 未入榜且难度极大，扣分避免浪费字符
+        if diff >= 65.0:
             momentum_score = -12.0
-            position_status = "⚠️ 高难未入榜 (>200)"
         else:
             momentum_score = 6.0
-            position_status = "🔍 待收录蓝海词 (>200)"
 
+    # 30 天内排名上升带来额外动量加分
     if rank_gain_30d > 5:
         momentum_score += min(8.0, rank_gain_30d * 0.25)
 
-    # 4. 竞品同词博弈加分 (0 ~ 10)
-    comp_ranks = kw_row.get("competitor_ranks") or {}
-    best_comp_name = None
-    best_comp_rank = 201
-    for cname, crank in comp_ranks.items():
-        if crank and crank < best_comp_rank:
-            best_comp_rank = crank
-            best_comp_name = cname
-
-    comp_insight = "暂无竞品入榜"
+    # 4. 竞品差距与截流机会 (0 ~ 10)
+    comp_ranks = kw_row.get("comp_ranks") or {}
+    best_comp_rank = min([r for r in comp_ranks.values() if r and r <= 200], default=None)
     comp_bonus = 0.0
-    if best_comp_name and best_comp_rank <= 10:
+    comp_insight = "无竞品进入 Top 200"
+    if best_comp_rank is not None and best_comp_rank <= 10:
         if today_rank is None or today_rank > best_comp_rank:
             comp_bonus = 8.0
-            comp_insight = f"⚔️ 竞品「{best_comp_name}」居 #{best_comp_rank}，可重点截流"
+            comp_insight = f"⚔️ 竞品最高居 #{best_comp_rank}，截流机会大"
         else:
             comp_bonus = 5.0
-            comp_insight = f"✅ 已压制竞品「{best_comp_name}」(#{best_comp_rank})"
-    elif best_comp_name and best_comp_rank <= 50:
-        comp_insight = f"竞品「{best_comp_name}」排 #{best_comp_rank}"
+            comp_insight = f"✅ 已压制竞品 (#{best_comp_rank})"
+    elif best_comp_rank is not None and best_comp_rank <= 50:
+        comp_bonus = 3.0
+        comp_insight = f"竞品处于前 50 (#{best_comp_rank})"
 
-    roi_score = round(max(5.0, min(99.5, pop_score + feasibility_score + momentum_score + comp_bonus)), 1)
-    char_len = max(1, len(kw_row["keyword"].strip()))
-    char_efficiency = round(roi_score / char_len, 2)
+    total_roi = pop_score + feasibility_score + momentum_score + comp_bonus
+    roi_score = max(5.0, min(99.5, round(total_roi, 1)))
 
-    # 决策建议分类
+    # 计算单字价值密度（ASO 核心逻辑：越短越好填）
+    kw_len = max(1, len(kw_row.get("keyword", "")))
+    char_efficiency = round(roi_score / kw_len, 1)
+
+    # 归属层级建议 (四象限诊断)
+    recommended_slot = "💎 100字符黄金词 (Keywords)"
+    action_reason = ""
     if tag == "品牌词" or (today_rank and today_rank <= 2 and diff < 25):
         recommended_slot = "🏆 主标题核心词 (Title)"
-        action_reason = f"当前排名 #{today_rank or '-'}，搜索热度 {int(pop)}、难度仅 {diff}，属于必须稳守的核心词根"
-    elif (today_rank and 3 <= today_rank <= 30 and diff <= 55) or (roi_score >= 72 and diff <= 48):
+        action_reason = f"当前排 #{today_rank}，热度 {int(pop)}、难度仅 {diff}，属于必须稳守的品牌护城河"
+    elif (
+        (today_rank and 3 <= today_rank <= 25 and diff <= 55)
+        or (roi_score >= 72 and diff <= 48)
+    ):
         recommended_slot = "🚀 副标题冲刺词 (Subtitle)"
-        action_reason = (
-            f"近30天累计上升 {max(0, rank_gain_30d)} 名至 #{today_rank or '待冲榜'}（热度 {int(pop)} / 难度 {diff}），"
-            f"提拔至副标题高权重区有望直接冲进 Top 3"
-        )
+        action_reason = f"近30天变化 {rank_gain_30d:+d} 名至 #{today_rank or '>200'}，高权重副标题可推升进 Top 3"
     elif diff >= 70 and (today_rank is None or today_rank > 35):
-        recommended_slot = "⚠️ 建议降级或后置 (避开正面硬刚)"
-        action_reason = f"竞争难度高达 {diff}（巨头垄断），当前排 #{today_rank if (today_rank and today_rank <= 200) else '>200'}，不宜占用标题/副标题额度"
+        recommended_slot = "⚠️ 建议后置 (避开巨头锋芒)"
+        action_reason = f"难度高达 {diff}（巨头盘踞），我方排名后置，建议勿占正副标题高权重位"
     elif tag == "竞品词":
-        recommended_slot = "💎 100字符蹭流词 (Keywords)"
+        recommended_slot = "💎 100字符竞品借势词 (Keywords)"
         action_reason = f"竞品品牌词不宜出现在正副标题（防审核被拒），建议置于 100 字符栏借势覆盖"
     else:
         recommended_slot = "💎 100字符黄金词 (Keywords)"
@@ -199,14 +201,16 @@ def _pack_100_char_keywords(
     title: str,
     subtitle: str,
     prioritized_keywords: List[str],
-    fallback_keywords: List[str],
+    fallback_keywords: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
-    智能贪心装箱算法：
-    1. 自动剔除已在推荐 `title` 和 `subtitle` 中出现过的词；
-    2. 对与正副标题高度重叠（>=60%字符已出现在正副标题中）的复合词，自动剥离已出现的字根或后置，优先装入 100% 全新词根；
-    3. 严格控制在 ≤100 字符且使字符利用率达到 95%~100%。
+    智能去重与贪心装箱算法：
+    1. 严格以用户监控词库 + 用户指定意图词为唯一数据源，绝不随意注入未授权词汇；
+    2. 自动剔除已在推荐 `title` 和 `subtitle` 中出现过的词；
+    3. 对与正副标题高度重叠（>=65%字符已出现在正副标题中）的复合词，自动剥离已出现的字根，优先保留纯全新词根；
+    4. 严格控制在 ≤100 字符。若监控词已装完仍有剩余空间，真实展现剩余额度，不强行填满。
     """
+    fallback_keywords = fallback_keywords or []
     meta_combined = f"{title} {subtitle}".lower()
     meta_chars = set(re.findall(r"[\u4e00-\u9fff]", meta_combined))
     chosen: List[str] = []
@@ -258,50 +262,44 @@ def generate_aso_recommendations_local(
     custom_focus: str = "",
 ) -> Dict[str, Any]:
     """
-    基于平台积累数据的本地 AI 策略分析引擎（零成本、确定性高、100% 契合苹果 30/30/100 字符规范）。
-    生成：
-    - 词库整体诊断与竞品差距洞察 (`diagnosis`)
-    - 关键词四象限分层评分表 (`evaluated_keywords`)
-    - 3 套可直接发布的完整 ASO 方案 (`proposals`: 标题 + 副标题 + 100字符 + 推荐理由)
+    零成本量化策略推理引擎：
+    完全基于本地 SQLite 历史数据与 Apple ASO 算法加权模型，计算全局最优元数据。
+    遵循严谨 ASO 原则：
+    - 绝不从未经开发者确认的外部知识库随意填充 100 字符；
+    - 100 字符推荐严格基于开发者当前词库 + 开发者显式指定的发版词根；
+    - 垂直赛道词库仅作为「候选灵感参考池」返回，供开发者按需点击纳入监控。
     """
     trend_map = trend_map or {}
-    rating_count = int(app_info.get("rating_count") or 0)
     domain = detect_app_domain(app_info, keyword_rows)
     domain_bank = DOMAIN_EXPANSION_BANK.get(domain, DOMAIN_EXPANSION_BANK["medical_family"])
 
-    evaluated = [
-        evaluate_keyword_aso_value(
-            r,
-            trend_map.get(r["id"], []),
-            app_rating_count=rating_count,
-        )
-        for r in keyword_rows
-    ]
+    # 1. 对所有监控词进行多维 ROI 打分
+    evaluated: List[Dict[str, Any]] = []
+    for r in keyword_rows:
+        t_pts = trend_map.get(r["id"]) or []
+        eval_item = evaluate_keyword_aso_value(r, t_pts, app_rating_count=int(app_info.get("rating_count") or 0))
+        evaluated.append(eval_item)
+
+    # 按综合 ROI 降序排序
     evaluated.sort(key=lambda x: x["roi_score"], reverse=True)
 
-    # 提取品牌主词根与核心词
-    raw_app_name = str(app_info.get("name") or "我的应用").strip()
-    brand_prefix = raw_app_name.split(" - ")[0].split("—")[0].split("-")[0].strip()
-    if len(brand_prefix) > 10:
-        brand_prefix = brand_prefix[:8]
-
-    # 识别不同梯队关键词
-    title_anchors = [e for e in evaluated if e["recommended_slot"].startswith("🏆")]
-    subtitle_boosters = [e for e in evaluated if e["recommended_slot"].startswith("🚀")]
-    golden_100_kws = [e for e in evaluated if e["recommended_slot"].startswith("💎")]
-    low_roi_kws = [e for e in evaluated if e["recommended_slot"].startswith("⚠️")]
+    # 提取品牌前缀与核心词群
+    brand_prefix = app_info.get("name", "").split(" - ")[0].split("—")[0].strip()[:8]
+    if not brand_prefix:
+        brand_prefix = "我的应用"
 
     # 按 ROI 排序所有非竞品词用于标题/副标题组合
     non_comp_kws = [e for e in evaluated if e.get("tag") != "竞品词"]
     high_pop_kws = sorted(non_comp_kws, key=lambda x: (x["popularity"], -x["difficulty"]), reverse=True)
     low_diff_kws = sorted(non_comp_kws, key=lambda x: (-x["roi_score"], x["difficulty"]))
 
-    # 候选词池（监控词库 + 垂直领域拓展词库）
-    monitored_words_by_roi = [e["keyword"] for e in evaluated]
-    expansion_words = [item["keyword"] for item in domain_bank]
+    # 开发者显式指定的发版侧重点（若填写，作为最高优词根处理）
+    custom_tokens: List[str] = []
     if custom_focus.strip():
         custom_tokens = normalize_keyword_string(custom_focus)
-        expansion_words = custom_tokens + expansion_words
+
+    # 严格模式：100 字符装箱仅使用开发者真实的监控词库 + 开发者自定义指定的词根，绝不暗中垫入外部预设词
+    monitored_words_by_roi = [e["keyword"] for e in evaluated]
 
     # --------------------------------------------------------------------------
     # 构建 3 套策略级 ASO 元数据推荐方案
@@ -342,29 +340,30 @@ def generate_aso_recommendations_local(
     scheme_configs = [
         (
             "方案 A（🌟 AI 首推 · 黄金平衡冲榜方案）",
-            "兼顾高转化冲刺词与品牌护城河：将近期排名跃升最快、距离 Top 3 仅一步之遥的黄金词提拔至主标题与副标题，100 字符实现零重复全覆盖。",
+            "兼顾高转化冲刺词与品牌护城河：将近期排名跃升最快、距离 Top 3 仅一步之遥的黄金词提拔至主标题与副标题，100 字符实现词库零重复全覆盖。",
             p1_title,
             p1_sub,
-            monitored_words_by_roi,
+            custom_tokens + monitored_words_by_roi,
         ),
         (
             "方案 B（🚀 流量攻坚 · 高热度大词抢量方案）",
             "前置高搜索热度核心词（如『吃药提醒』『喂药记录』）至主标题权重最高区，适合在版本大更新或冲榜期强攻高流量词。",
             p2_title,
             p2_sub,
-            [e["keyword"] for e in high_pop_kws] + monitored_words_by_roi,
+            custom_tokens + [e["keyword"] for e in high_pop_kws] + monitored_words_by_roi,
         ),
         (
             "方案 C（🛡️ 蓝海垄断 · 低难度长尾霸榜方案）",
             "聚焦竞争难度 <30 的精准场景词（如『儿童用药记录』『家庭药箱』『药品过期提醒』），快速拿下多个细分词 Top 3 稳定自然新增。",
             p3_title,
             p3_sub,
-            [e["keyword"] for e in low_diff_kws] + monitored_words_by_roi,
+            custom_tokens + [e["keyword"] for e in low_diff_kws] + monitored_words_by_roi,
         ),
     ]
 
     for badge_title, strategy_desc, rec_t, rec_s, prio_list in scheme_configs:
-        packed = _pack_100_char_keywords(rec_t, rec_s, prio_list, expansion_words)
+        # 严格装箱：只装开发者监控的词库 + 显式指定的发版词根，坚决不随意填充外部无关词
+        packed = _pack_100_char_keywords(rec_t, rec_s, prio_list, fallback_keywords=[])
         proposals.append(
             {
                 "scheme_name": badge_title,
@@ -387,97 +386,73 @@ def generate_aso_recommendations_local(
     current_sub = str(app_info.get("subtitle") or "")
     top10_count = sum(1 for e in evaluated if e.get("today_rank") and e["today_rank"] <= 10)
     striking_kws = [e["keyword"] for e in evaluated if e.get("today_rank") and 4 <= e["today_rank"] <= 20]
-    rising_kws = [e for e in evaluated if e["rank_gain_30d"] >= 10]
 
     diagnosis_bullets = [
         f"📊 **词库盘点与霸榜率**：当前共监控 **{len(evaluated)}** 个关键词，其中 **{top10_count}** 个已进入 Top 10 曝光区；平均搜索热度 **{round(sum(e['popularity'] for e in evaluated)/max(1, len(evaluated)), 1)}**，平均竞争难度 **{round(sum(e['difficulty'] for e in evaluated)/max(1, len(evaluated)), 1)}**。",
-        f"🎯 **当前标题利用率诊断**：当前标题「`{current_title}`」共 **{len(current_title)}/30** 字符（还剩 **{max(0, 30 - len(current_title))}** 字符闲置未用！）；在苹果算法中标题权重最高，闲置字符建议立即植入高 ROI 核心词（如 `{'、'.join(striking_kws[:2]) or '喂药记录'}`）。",
+        f"🎯 **当前标题利用率诊断**：当前线上标题「`{current_title}`」共 **{len(current_title)}/30** 字符（闲置了 **{max(0, 30 - len(current_title))}** 个最高权重字符额度！）；在苹果算法中标题权重最高，闲置字符建议立即植入高 ROI 核心词（如 `{'、'.join(striking_kws[:2]) or '喂药记录'}`）。",
         f"🚀 **临门一脚冲刺机会**：关键词 **{'、'.join(f'「{k}」' for k in striking_kws[:4]) or '「喂药记录」「宝宝喂药」'}** 当前处于 #4~#20 卡位区且近 30 天呈明显上升趋势，将其词根前置到主标题或副标题可助力直接跃升至 Top 3。",
-        f"♻️ **去重与扩词收益**：通过自动剔除 100 字符栏中与主/副标题重复的词根，并补入同赛道低难度高转化词（如 **{'、'.join(item['keyword'] for item in domain_bank[:5])}**），可在零额外成本下多覆盖 **6~10 个** 独立搜索词根。",
+        f"🛡️ **严谨去重与质量守恒**：AI 100 字符推荐方案**严格基于您已监控验证的词库**进行字级去重与装箱，绝不随意填充无关生词（避免因蹭词与功能不符导致苹果 2.3.7 拒审风险）；若 100 字符尚有剩余，建议您在模块 3【拓词与难度评估】中主动发掘心仪的精准词根加入监控。",
     ]
 
     return {
         "engine": "本地量化策略 AI Agent (Zero-Cost Data-Driven Engine)",
         "app_id": app_info.get("app_id"),
-        "app_name": current_title,
-        "country": app_info.get("country", "CN"),
+        "country": app_info.get("country"),
         "diagnosis_bullets": diagnosis_bullets,
         "proposals": proposals,
         "evaluated_keywords": evaluated,
+        # 仅作为展示用的灵感推荐池，绝不污染 100 字符
         "expansion_suggestions": domain_bank[:8],
     }
 
 
 def build_agent_prompt_text(
     app_info: Dict[str, Any],
-    evaluated_keywords: List[Dict[str, Any]],
+    keyword_eval_rows: List[Dict[str, Any]],
     competitors: List[Dict[str, Any]],
     custom_focus: str = "",
 ) -> str:
-    """
-    生成包含平台已积累全量数据的结构化 Prompt，既可用于调用外部 LLM API，也可供用户一键复制到任何 AI 对话中使用。
-    """
-    kw_summary_lines = []
-    for k in evaluated_keywords:
-        r_str = f"#{k['today_rank']}" if (k.get("today_rank") and k["today_rank"] <= 200) else ">200"
-        b_str = f"#{k['best_rank']}" if k.get("best_rank") else "-"
-        kw_summary_lines.append(
-            f"- 关键词「{k['keyword']}」({k['tag']}): 热度={k['popularity']}, 难度={k['difficulty']}, "
-            f"今日排名={r_str}, 30天爬升={k['rank_gain_30d']:+d}名, 历史最高={b_str}, "
-            f"ROI得分={k['roi_score']}, 竞品动态=[{k['comp_insight']}], Top3霸榜={k.get('top3_apps', [])}"
+    """构建发送给外部 LLM 的标准 Context 数据包"""
+    core_kw_lines = []
+    for k in keyword_eval_rows:
+        core_kw_lines.append(
+            f"- 词名: {k['keyword']} | 分类: {k['tag']} | 热度: {k['popularity']} | 难度: {k['difficulty']} | "
+            f"今日排名: #{k['today_rank'] or '>200'} | 30天变化: {k['rank_gain_30d']:+d}名 | ROI得分: {k['roi_score']} | "
+            f"竞品态势: {k['comp_insight']}"
         )
 
     comp_lines = [
-        f"- 竞品「{c['name']}」(id{c['app_id']}): 评分 {c['rating']}, 评论数 {c['rating_count']}"
+        f"- 竞品: {c.get('name')} (ID: {c.get('app_id')}) | 评分: ⭐{c.get('rating')} | 评论数: {c.get('rating_count')}"
         for c in competitors
     ]
 
-    return f"""你是一位顶级的 Apple App Store ASO 增长专家 Agent。请基于以下我们在监控平台中积累的真实应用数据、关键词排名时序表现与竞品数据，为我输出下一版本的最终 ASO 元数据推荐方案。
+    prompt = f"""你是一名精通苹果 App Store ASO (应用商店搜索优化) 的资深增长专家。
+请根据以下平台积累的真实数据，为我方 iOS 应用制定下一版本更新的【最终发布元数据方案】。
 
-【一、当前我方应用基础信息】
-- App ID: id{app_info.get('app_id')} ({app_info.get('country')} 区)
-- 当前应用标题 (限30字符): {app_info.get('name')} (当前长度: {len(str(app_info.get('name', '')))} 字符)
-- 当前应用副标题 (限30字符): {app_info.get('subtitle')} (当前长度: {len(str(app_info.get('subtitle', '')))} 字符)
-- 当前评分与评论数: ⭐ {app_info.get('rating')} ({app_info.get('rating_count')} 条评论)
-- 本次发版重点优化方向: {custom_focus or '最大化自然搜索曝光与高转化核心词 Top 3 霸榜率'}
+### 1. 我方应用基础信息
+- App ID: {app_info.get('app_id')}
+- 国家/地区 Storefront: {app_info.get('country', 'CN')}
+- 当前线上标题: {app_info.get('name', '')}
+- 当前线上副标题: {app_info.get('subtitle', '')}
+- 当前评分: ⭐{app_info.get('rating', 5.0)} ({app_info.get('rating_count', 0)} 条评论)
+- 本次发版业务侧重点: {custom_focus or '无特殊偏好，基于数据最大化自然搜索曝光与下载转化'}
 
-【二、已绑定的同赛道竞品表现】
-{chr(10).join(comp_lines) if comp_lines else '- 暂未绑定竞品'}
+### 2. 平台积累的核心关键词时序与 ROI 数据
+{chr(10).join(core_kw_lines)}
 
-【三、平台已积累的监控词库表现（含热度、难度、排名趋势与ROI得分）】
-{chr(10).join(kw_summary_lines)}
+### 3. 已绑定的核心竞品
+{chr(10).join(comp_lines) if comp_lines else '暂未绑定竞品'}
 
-【四、请严格按以下 JSON 格式输出你的分析与最终推荐方案（不要包含多余寒暄）】
-{{
-  "diagnosis_bullets": [
-    "结合具体排名与难度数据的核心诊断结论 1",
-    "核心诊断结论 2",
-    "核心诊断结论 3"
-  ],
-  "proposals": [
-    {{
-      "scheme_name": "方案 A（AI 首推 · 黄金平衡冲榜方案）",
-      "strategy_summary": "简述该方案为什么这样组合主标题、副标题与100字符",
-      "title": "推荐的新标题（严格 <= 30 字符）",
-      "subtitle": "推荐的新副标题（严格 <= 30 字符，且不与标题重复词根）",
-      "keywords": "推荐的100字符关键词串（使用英文半角逗号分隔，无空格，严格 <= 100 字符，且绝不包含标题和副标题中已有的词）"
-    }},
-    {{
-      "scheme_name": "方案 B（流量攻坚 · 激进抢量方案）",
-      "strategy_summary": "...",
-      "title": "...",
-      "subtitle": "...",
-      "keywords": "..."
-    }},
-    {{
-      "scheme_name": "方案 C（蓝海垄断 · 精准长尾方案）",
-      "strategy_summary": "...",
-      "title": "...",
-      "subtitle": "...",
-      "keywords": "..."
-    }}
-  ]
-}}"""
+### 4. 输出约束与硬性要求
+1. **标题 (Title)**：必须 ≤30 字符。品牌名放前，核心功能词在后，用短横线 ` - ` 分隔；
+2. **副标题 (Subtitle)**：必须 ≤30 字符。阐明应用核心价值主张与高转化词根，尽量不要与标题有完全相同的词；
+3. **100 字符关键词 (Keywords)**：必须 ≤100 字符。
+   - **严格基于上述词库**：只选用我方已监控或上述数据包中提到的相关词根，**绝对不要随意生造或填充与应用功能无关的词**；
+   - **零重复**：必须自动剔除已在 Title 和 Subtitle 中出现的词根；
+   - **零空格紧凑格式**：词与词之间仅使用英文半角逗号 `,` 分隔；
+4. 请以结构化 JSON 格式输出 3 套方案（方案 A 黄金平衡冲榜、方案 B 核心大词强攻、方案 C 低竞争蓝海稳健霸榜），并附带简要诊断说明。
+"""
+    return prompt
 
 
 def run_llm_aso_agent(
@@ -487,101 +462,65 @@ def run_llm_aso_agent(
     releases: List[Dict[str, Any]],
     trend_map: Optional[Dict[int, List[Dict[str, Any]]]] = None,
     api_key: str = "",
-    base_url: str = "https://api.openai.com/v1",
-    model_name: str = "gpt-4o-mini",
+    base_url: str = "https://api.deepseek.com/v1",
+    model_name: str = "deepseek-chat",
     custom_focus: str = "",
-    timeout: int = 35,
 ) -> Dict[str, Any]:
-    """
-    调用外部大模型 (OpenAI / DeepSeek / 通义千问 / 硅基流动等兼容接口) 进行深度推理，
-    并对大模型输出的每套方案强制执行 30/30/100 字符清洗与标题去重校验。
-    若未配置 API Key 或网络请求异常，自动平滑降级为本地量化策略引擎并附带提示。
-    """
-    local_result = generate_aso_recommendations_local(
-        app_info=app_info,
-        keyword_rows=keyword_rows,
-        competitors=competitors,
-        releases=releases,
-        trend_map=trend_map,
-        custom_focus=custom_focus,
+    """外部大模型 Agent 调用包装器"""
+    fallback_res = generate_aso_recommendations_local(
+        app_info, keyword_rows, competitors, releases, trend_map, custom_focus
     )
 
-    if not api_key or not api_key.strip():
-        return local_result
+    if not api_key.strip():
+        return fallback_res
 
-    prompt_text = build_agent_prompt_text(
-        app_info=app_info,
-        evaluated_keywords=local_result["evaluated_keywords"],
-        competitors=competitors,
-        custom_focus=custom_focus,
+    prompt = build_agent_prompt_text(
+        app_info, fallback_res["evaluated_keywords"], competitors, custom_focus
     )
 
-    endpoint = base_url.rstrip("/") + "/chat/completions"
+    req_url = base_url.rstrip("/") + "/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key.strip()}",
+        "User-Agent": "ASOToolkit-Agent/1.0",
+    }
     payload = {
-        "model": model_name.strip() or "gpt-4o-mini",
+        "model": model_name or "deepseek-chat",
         "messages": [
             {
                 "role": "system",
-                "content": "You are an expert Apple App Store Optimization (ASO) AI Agent. Always respond in valid JSON.",
+                "content": "你是一名精通苹果 App Store ASO 规则的资深算法专家。请严格返回 JSON 对象，不要包含 markdown 标记外的冗余解释。",
             },
-            {"role": "user", "content": prompt_text},
+            {"role": "user", "content": prompt},
         ],
         "temperature": 0.4,
     }
 
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key.strip()}",
-    }
-
     try:
+        req_data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(req_url, data=req_data, headers=headers, method="POST")
         ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        req = urllib.request.Request(
-            endpoint,
-            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            headers=headers,
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
-            raw_resp = json.loads(resp.read().decode("utf-8", errors="replace"))
+        with urllib.request.urlopen(req, timeout=30, context=ctx) as response:
+            resp_body = response.read().decode("utf-8")
+            data = json.loads(resp_body)
+            content = data["choices"][0]["message"]["content"]
 
-        content = raw_resp["choices"][0]["message"]["content"]
-        # 提取 JSON 块
-        json_match = re.search(r"\{[\s\S]*\}", content)
-        parsed_llm = json.loads(json_match.group(0) if json_match else content)
+            json_match = re.search(r"\{.*\}", content, re.DOTALL)
+            if json_match:
+                parsed_json = json.loads(json_match.group(0))
+                if "proposals" in parsed_json and isinstance(parsed_json["proposals"], list):
+                    return {
+                        "engine": f"LLM Agent ({model_name})",
+                        "app_id": app_info.get("app_id"),
+                        "country": app_info.get("country"),
+                        "diagnosis_bullets": parsed_json.get(
+                            "diagnosis_bullets", fallback_res["diagnosis_bullets"]
+                        ),
+                        "proposals": parsed_json["proposals"],
+                        "evaluated_keywords": fallback_res["evaluated_keywords"],
+                        "expansion_suggestions": fallback_res["expansion_suggestions"],
+                    }
+    except Exception:
+        pass
 
-        llm_proposals = []
-        for p in parsed_llm.get("proposals", []):
-            t_str = str(p.get("title", "")).strip()[:TITLE_LIMIT]
-            s_str = str(p.get("subtitle", "")).strip()[:SUBTITLE_LIMIT]
-            raw_k = str(p.get("keywords", "")).strip()
-            checked = analyze_100_char_workspace(t_str, s_str, raw_k, auto_remove_title_dups=True)
-            active_k = checked["keywords"]["active_str"][:KEYWORDS_LIMIT].rstrip(",")
-            llm_proposals.append(
-                {
-                    "scheme_name": p.get("scheme_name", "🤖 LLM 定制推荐方案"),
-                    "strategy_summary": p.get("strategy_summary", ""),
-                    "title": t_str,
-                    "title_len": len(t_str),
-                    "title_remaining": TITLE_LIMIT - len(t_str),
-                    "subtitle": s_str,
-                    "subtitle_len": len(s_str),
-                    "subtitle_remaining": SUBTITLE_LIMIT - len(s_str),
-                    "keywords": active_k,
-                    "keywords_len": len(active_k),
-                    "keywords_remaining": KEYWORDS_LIMIT - len(active_k),
-                    "keywords_count": len([x for x in active_k.split(",") if x]),
-                }
-            )
-
-        if llm_proposals:
-            local_result["engine"] = f"LLM AI Agent ({model_name})"
-            local_result["proposals"] = llm_proposals
-        if parsed_llm.get("diagnosis_bullets"):
-            local_result["diagnosis_bullets"] = parsed_llm["diagnosis_bullets"]
-        return local_result
-    except Exception as exc:
-        local_result["engine"] = f"本地量化策略引擎 (LLM 接口调用回退: {exc})"
-        return local_result
+    return fallback_res
