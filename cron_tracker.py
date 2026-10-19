@@ -8,6 +8,7 @@
 """
 import argparse
 import json
+import os
 import sys
 import urllib.request
 from datetime import date
@@ -42,6 +43,7 @@ def send_webhook_alert(webhook_url: str, title: str, lines: list[str]) -> None:
 
 
 def run_daily_tracking(sleep_sec: float = DEFAULT_RATE_LIMIT_SECONDS, webhook_url: str = "", drop_threshold: int = 10) -> None:
+    webhook_url = webhook_url or os.getenv("ASO_WEBHOOK_URL", "")
     init_db()
     own_apps = list_own_apps()
     if not own_apps:
@@ -116,7 +118,12 @@ def run_daily_tracking(sleep_sec: float = DEFAULT_RATE_LIMIT_SECONDS, webhook_ur
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="个人轻量级 ASO 每日定时追踪脚本")
     parser.add_argument("--sleep", type=float, default=DEFAULT_RATE_LIMIT_SECONDS, help="每次请求间隔秒数 (默认 3.5 秒)")
-    parser.add_argument("--webhook", type=str, default="", help="飞书/企微/自定义告警 Webhook 地址")
+    parser.add_argument(
+        "--webhook",
+        type=str,
+        default=os.getenv("ASO_WEBHOOK_URL", ""),
+        help="飞书/企微/自定义告警 Webhook 地址 (亦可通过环境变量 ASO_WEBHOOK_URL 配置)",
+    )
     parser.add_argument("--drop-threshold", type=int, default=10, help="触发告警的排名下跌名次阈值")
     args = parser.parse_args()
     run_daily_tracking(sleep_sec=args.sleep, webhook_url=args.webhook, drop_threshold=args.drop_threshold)

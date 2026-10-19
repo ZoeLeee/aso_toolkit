@@ -6,6 +6,7 @@
 - 在「模块 3：拓词挖掘」点击 ➕ 监控 或「模块 2」批量加词时，支持自动立即抓取首日真实排名与难度分
 - 支持单独刷新某个关键词、删除单个关键词、或一键清理演示应用数据
 """
+import os
 from datetime import date
 import pandas as pd
 import streamlit as st
@@ -825,11 +826,19 @@ with tab5:
                 if engine_choice.startswith("🧠"):
                     llm_base_url = st.text_input(
                         "API Base URL",
-                        value="https://api.deepseek.com/v1",
+                        value=os.getenv("LLM_BASE_URL", "https://api.deepseek.com/v1"),
                         placeholder="如 https://api.openai.com/v1 或 https://api.deepseek.com/v1",
                     )
-                    llm_model = st.text_input("模型名称 (Model)", value="deepseek-chat")
-                    llm_api_key = st.text_input("API Key", type="password", placeholder="sk-...")
+                    llm_model = st.text_input(
+                        "模型名称 (Model)",
+                        value=os.getenv("LLM_MODEL", "deepseek-chat"),
+                    )
+                    llm_api_key = st.text_input(
+                        "API Key",
+                        value=os.getenv("LLM_API_KEY", ""),
+                        type="password",
+                        placeholder="sk-...",
+                    )
                 else:
                     llm_base_url, llm_model, llm_api_key = "", "", ""
                     st.info(

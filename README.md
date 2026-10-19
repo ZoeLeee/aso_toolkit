@@ -39,4 +39,40 @@ streamlit run app.py
 # 0 8 * * * /usr/bin/python3 /path/to/cron_tracker.py --sleep 3.5 --webhook "https://open.feishu.cn/..."
 ```
 
+## 自动化生产部署 (Docker & GitHub Actions)
+
+本工程支持通过 GitHub Actions 进行自动化 CI/CD 部署，流水线配置位于 `.github/workflows/deploy-server-production.yml`。
+
+### 1. 部署架构
+- **镜像仓库**: GitHub Container Registry (`ghcr.io/zoeleee/aso-toolkit`)
+- **运行环境**: Linux Docker + Docker Compose，默认暴露端口 `8501`
+- **数据持久化**: 映射主机目录 `~/deployments/aso-toolkit-production/data` 至容器内 `/app/data`，保障 SQLite 数据 `aso_data.db` 在更新版本时持久不丢失
+
+### 2. GitHub Secrets 配置要求
+在 GitHub 仓库中，进入 **Settings -> Environments -> production**（或 Repository Secrets），配置以下密钥：
+
+| Secret 字段 | 必须 | 说明 | 示例 / 默认值 |
+| :--- | :---: | :--- | :--- |
+| `SERVER_HOST` | 是 | 生产服务器 IP 或域名 | `1.2.3.4` |
+| `SERVER_USER` | 是 | SSH 登录用户名 | `root` / `ubuntu` |
+| `SERVER_SSH_KEY` | 是 | 服务器 SSH 私钥 (免密登录) | `-----BEGIN OPENSSH PRIVATE KEY-----...` |
+| `SERVER_PORT` | 否 | SSH 端口 | `22` (默认) |
+| `GHCR_PAT` | 是 | 拥有 `read:packages` 权限的 GitHub Personal Access Token | `ghp_...` |
+| `APP_SERVER_PORT`| 否 | 服务器宿主机对外映射端口 | `8501` (默认) |
+| `LLM_API_KEY` | 否 | 模块 5 大模型 API Key (如 DeepSeek/OpenAI) | `sk-...` |
+| `LLM_BASE_URL` | 否 | 大模型 API 基础地址 | `https://api.deepseek.com/v1` |
+| `LLM_MODEL` | 否 | 大模型模型名称 | `deepseek-chat` |
+| `ASO_WEBHOOK_URL`| 否 | 每日监控告警飞书/企微 Webhook 地址 | `https://open.feishu.cn/...` |
+
+### 3. 手动触发部署
+进入 GitHub 仓库页面 -> **Actions** -> **Deploy ASO Toolkit - Production** -> **Run workflow**，选择目标分支（默认 `master`）即可自动完成镜像打包、推送与远程服务器部署。
+
+### 4. 生产环境配置每日定时爬虫
+容器部署成功后，可在服务器上添加定时任务（如每日早上 8:00）：
+```bash
+crontab -e
+# 添加以下任务 (利用 docker exec 运行容器内爬虫脚本)：
+0 8 * * * docker exec aso-toolkit-production python3 cron_tracker.py --sleep 3.5
+```
+
 更多高级功能与工作流请查看 **[USER_GUIDE.md](./USER_GUIDE.md)**。

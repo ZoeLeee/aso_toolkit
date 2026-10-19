@@ -3,18 +3,29 @@ SQLite 数据库层 (db.py)
 严格遵循 PRD 第四章表结构设计，并扩展竞品绑定 (competitors) 与版本发布记录 (version_releases) 支持 P1 需求。
 """
 import json
+import os
+import shutil
 import sqlite3
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-DB_PATH = Path(__file__).parent / "aso_data.db"
+DB_PATH = Path(os.getenv("ASO_DB_PATH", Path(__file__).parent / "aso_data.db"))
 
 
 def get_conn(db_path: Path = DB_PATH) -> sqlite3.Connection:
     db_path = Path(db_path)
     if db_path.parent:
         db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # 若目标数据库文件不存在且包内存在模板数据库（如 Docker 镜像内置数据），自动初始化复制
+    default_template = Path(__file__).parent / "aso_data.db"
+    if not db_path.exists() and default_template.resolve() != db_path.resolve() and default_template.exists():
+        try:
+            shutil.copy2(default_template, db_path)
+        except Exception:
+            pass
+
     conn = sqlite3.connect(str(db_path), check_same_thread=False, isolation_level=None)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=MEMORY;")
