@@ -7,6 +7,7 @@
 - 支持单独刷新某个关键词、删除单个关键词、或一键清理演示应用数据
 """
 from datetime import date
+import json
 import pandas as pd
 import streamlit as st
 
@@ -877,7 +878,7 @@ with tab5:
                         recommended_subtitle=best_p["subtitle"],
                         recommended_keywords=best_p["keywords"],
                         summary_report="\n".join(report.get("diagnosis_bullets", [])),
-                        full_json=pd.io.json.dumps(report),
+                        full_json=json.dumps(report, ensure_ascii=False),
                     )
                     st.toast("✅ 已生成最新 ASO 推荐方案并存入历史记录！")
 
