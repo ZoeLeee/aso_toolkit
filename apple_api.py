@@ -30,7 +30,45 @@ STOREFRONT_MAP: Dict[str, str] = {
     "FR": "143442-3,29",   # 法国 (法语)
 }
 
+STOREFRONT_LABELS: Dict[str, str] = {
+    "CN": "🇨🇳 中国大陆 (CN)",
+    "US": "🇺🇸 美国 (US)",
+    "JP": "🇯🇵 日本 (JP)",
+    "TW": "🇹🇼 中国台湾 (TW)",
+    "HK": "🇭🇰 中国香港 (HK)",
+    "KR": "🇰🇷 韩国 (KR)",
+    "GB": "🇬🇧 英国 (GB)",
+    "DE": "🇩🇪 德国 (DE)",
+    "FR": "🇫🇷 法国 (FR)",
+}
+
 DEFAULT_RATE_LIMIT_SECONDS = 3.5
+
+
+def batch_fetch_app_metadata(
+    app_input: str, countries: List[str], timeout: int = 12
+) -> Dict[str, Any]:
+    """
+    批量获取指定 App 在多个国家/地区的线上元数据。
+    返回结构:
+    {
+        "success": {country: metadata_dict},
+        "failed": [country_codes]
+    }
+    """
+    success = {}
+    failed = []
+    for c in countries:
+        try:
+            meta = fetch_app_Metadata(app_input, country=c, timeout=timeout)
+            if meta:
+                success[c.upper()] = meta
+            else:
+                failed.append(c.upper())
+        except Exception:
+            failed.append(c.upper())
+    return {"success": success, "failed": failed}
+
 
 
 def extract_app_info_from_input(input_str: str) -> Dict[str, Optional[str]]:

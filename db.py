@@ -172,6 +172,43 @@ def list_own_apps_with_stats(db_path: Path = DB_PATH) -> List[Dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+def list_own_apps_grouped(db_path: Path = DB_PATH) -> List[Dict[str, Any]]:
+    """
+    按 App ID 聚合我方监控应用，形成树状结构:
+    每个 App 包含基本信息以及其下所监控的所有国家/地区列表。
+    """
+    flat_apps = list_own_apps_with_stats(db_path)
+    grouped_map: Dict[str, Dict[str, Any]] = {}
+
+    for row in flat_apps:
+        aid = str(row["app_id"])
+        c_code = row["country"].upper()
+        if aid not in grouped_map:
+            grouped_map[aid] = {
+                "app_id": aid,
+                "name": row["name"],
+                "icon_url": row.get("icon_url", ""),
+                "created_at": row.get("created_at", ""),
+                "countries": [],
+                "regions": {},
+                "total_keywords": 0,
+                "total_competitors": 0,
+            }
+        # 如果国区存在，优先以国区名称或非空名称为主显示名
+        if c_code == "CN" or (not grouped_map[aid]["name"] and row["name"]):
+            grouped_map[aid]["name"] = row["name"]
+        if row.get("icon_url") and not grouped_map[aid]["icon_url"]:
+            grouped_map[aid]["icon_url"] = row["icon_url"]
+
+        grouped_map[aid]["countries"].append(c_code)
+        grouped_map[aid]["regions"][c_code] = row
+        grouped_map[aid]["total_keywords"] += row.get("keyword_count", 0)
+        grouped_map[aid]["total_competitors"] += row.get("competitor_count", 0)
+
+    return list(grouped_map.values())
+
+
+
 def list_competitors(parent_app_id: str, country: str, db_path: Path = DB_PATH) -> List[Dict[str, Any]]:
     conn = get_conn(db_path)
     rows = conn.execute(
@@ -394,25 +431,53 @@ def list_version_releases(app_id: str, country: str, db_path: Path = DB_PATH) ->
     return [dict(r) for r in rows]
 
 
-def delete_app(app_id: str, country: str, db_path: Path = DB_PATH) -> None:
-    """删除指定监控应用及其关联词库、历史快照与绑定竞品"""
+def delete_app(app_id: str, country: Optional[str] = None, db_path: Path = DB_PATH) -> None:
+    """
+    删除指定监控应用数据。
+    若传入 country，则仅删除该应用在对应地区的数据、词库与关联竞品；
+    若 country 为 None 或空，则彻底清除该 App 在所有地区的全量数据。
+    """
     conn = get_conn(db_path)
-    cc = country.upper()
-    kw_ids = [
-        r["id"]
-        for r in conn.execute(
-            "SELECT id FROM keywords WHERE app_id = ? AND country = ?", (str(app_id), cc)
-        ).fetchall()
-    ]
-    for kid in kw_ids:
-        conn.execute("DELETE FROM rank_history WHERE keyword_id = ?", (kid,))
-    conn.execute("DELETE FROM rank_history WHERE app_id = ?", (str(app_id),))
-    conn.execute("DELETE FROM keywords WHERE app_id = ? AND country = ?", (str(app_id), cc))
-    conn.execute("DELETE FROM version_releases WHERE app_id = ? AND country = ?", (str(app_id), cc))
-    conn.execute("DELETE FROM apps WHERE parent_app_id = ? AND country = ?", (str(app_id), cc))
-    conn.execute("DELETE FROM apps WHERE app_id = ? AND country = ?", (str(app_id), cc))
+    aid = str(app_id)
+    if country:
+        cc = country.upper()
+        kw_ids = [
+            r["id"]
+            for r in conn.execute(
+                "SELECT id FROM keywords WHERE app_id = ? AND country = ?", (aid, cc)
+            ).fetchall()
+        ]
+        for kid in kw_ids:
+            conn.execute("DELETE FROM rank_history WHERE keyword_id = ?", (kid,))
+        conn.execute("DELETE FROM keywords WHERE app_id = ? AND country = ?", (aid, cc))
+        conn.execute("DELETE FROM version_releases WHERE app_id = ? AND country = ?", (aid, cc))
+        conn.execute("DELETE FROM apps WHERE parent_app_id = ? AND country = ?", (aid, cc))
+        conn.execute("DELETE FROM apps WHERE app_id = ? AND country = ?", (aid, cc))
+        try:
+            conn.execute("DELETE FROM ai_recommendations WHERE app_id = ? AND country = ?", (aid, cc))
+        except Exception:
+            pass
+    else:
+        kw_ids = [
+            r["id"]
+            for r in conn.execute(
+                "SELECT id FROM keywords WHERE app_id = ?", (aid,)
+            ).fetchall()
+        ]
+        for kid in kw_ids:
+            conn.execute("DELETE FROM rank_history WHERE keyword_id = ?", (kid,))
+        conn.execute("DELETE FROM rank_history WHERE app_id = ?", (aid,))
+        conn.execute("DELETE FROM keywords WHERE app_id = ?", (aid,))
+        conn.execute("DELETE FROM version_releases WHERE app_id = ?", (aid,))
+        conn.execute("DELETE FROM apps WHERE parent_app_id = ?", (aid,))
+        conn.execute("DELETE FROM apps WHERE app_id = ?", (aid,))
+        try:
+            conn.execute("DELETE FROM ai_recommendations WHERE app_id = ?", (aid,))
+        except Exception:
+            pass
     conn.commit()
     conn.close()
+
 
 
 def delete_competitor(parent_app_id: str, comp_app_id: str, country: str, db_path: Path = DB_PATH) -> None:

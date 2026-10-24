@@ -13,7 +13,9 @@ import streamlit as st
 
 from apple_api import (
     DEFAULT_RATE_LIMIT_SECONDS,
+    STOREFRONT_LABELS,
     STOREFRONT_MAP,
+    batch_fetch_app_metadata,
     batch_update_keywords_with_rate_limit,
     extract_app_info_from_input,
     fetch_app_Metadata,
@@ -32,6 +34,7 @@ from db import (
     init_db,
     list_competitors,
     list_own_apps,
+    list_own_apps_grouped,
     list_own_apps_with_stats,
     list_version_releases,
     save_rank_snapshot,
@@ -56,125 +59,210 @@ st.set_page_config(
 
 init_db()
 
-# 侧边栏：我方应用与国家/地区切换
-# 侧边栏：我方应用与国家/地区切换
+# ==============================================================================
+# 侧边栏：我方主应用与监控区域两级联动
+# ==============================================================================
 st.sidebar.title("📈 ASO 监控工作台")
-st.sidebar.caption("V1.0 正式版 · 零成本个人独立开发版")
+st.sidebar.caption("V1.0 正式版 · 多地区集中监控")
 
-own_apps = list_own_apps_with_stats()
-app_options = {f"{a['name']} ({a['country']}) - {a['app_id']}": a for a in own_apps}
-option_labels = list(app_options.keys())
+grouped_apps = list_own_apps_grouped()
+app_map = {a["app_id"]: a for a in grouped_apps}
+app_ids = list(app_map.keys())
 
 selected_app = None
-if option_labels:
-    default_idx = 0
-    if "active_app_id" in st.session_state:
-        for i, lbl in enumerate(option_labels):
-            if app_options[lbl]["app_id"] == st.session_state["active_app_id"]:
-                default_idx = i
-                break
+active_grouped_app = None
 
-    selected_label = st.sidebar.selectbox(
-        "当前监控应用 (App + 国家)",
-        option_labels,
-        index=default_idx,
-    )
-    selected_app = app_options[selected_label]
-    st.session_state["active_app_id"] = selected_app["app_id"]
+if app_ids:
+    if "active_app_id" not in st.session_state or st.session_state["active_app_id"] not in app_map:
+        st.session_state["active_app_id"] = app_ids[0]
 
-    if selected_app.get("icon_url"):
-        st.sidebar.image(selected_app["icon_url"], width=64)
-    st.sidebar.markdown(
-        f"**应用名称:** {selected_app['name']}  \n"
-        f"**App ID:** `id{selected_app['app_id']}`  \n"
-        f"**Storefront:** `{selected_app['country']}` (`{STOREFRONT_MAP.get(selected_app['country'], '')}`)  \n"
-        f"**当前版本:** `{selected_app.get('version') or '-'}`  \n"
-        f"**当前评分:** ⭐ {selected_app['rating']} ({selected_app['rating_count']:,} 条评论)  \n"
-        f"**数据规模:** 🔑 `{selected_app.get('keyword_count', 0)}` 个词 · ⚔️ `{selected_app.get('competitor_count', 0)}` 款竞品"
+    current_app_idx = app_ids.index(st.session_state["active_app_id"])
+
+    def format_app_sidebar_label(aid: str) -> str:
+        item = app_map[aid]
+        c_count = len(item["countries"])
+        return f"{item['name']} (id{aid}) · {c_count} 区域"
+
+    chosen_app_id = st.sidebar.selectbox(
+        "📱 当前监控主应用 (App)",
+        app_ids,
+        index=current_app_idx,
+        format_func=format_app_sidebar_label,
+        key="sidebar_app_select",
     )
-    if st.sidebar.button("🔄 刷新 App 线上最新状态", use_container_width=True, help="立即调用 Apple Lookup 接口更新该 App 的版本、评分与评论总数"):
-        with st.spinner("正在请求 Apple 接口拉取最新元数据..."):
-            try:
-                meta = fetch_app_Metadata(selected_app["app_id"], selected_app["country"])
-                if meta:
-                    old_ver = (selected_app.get("version") or "").strip()
-                    new_ver = (meta.get("version") or "").strip()
-                    if old_ver and new_ver and old_ver != new_ver:
-                        add_version_release(
-                            selected_app["app_id"],
-                            selected_app["country"],
-                            new_ver,
-                            date.today().isoformat(),
-                            notes=f"手动刷新检测到新版本发布：v{old_ver} → v{new_ver}",
+    st.session_state["active_app_id"] = chosen_app_id
+    active_grouped_app = app_map[chosen_app_id]
+
+    available_countries = active_grouped_app["countries"]
+    if "active_country" not in st.session_state or st.session_state["active_country"] not in available_countries:
+        st.session_state["active_country"] = "CN" if "CN" in available_countries else available_countries[0]
+
+    st.sidebar.markdown("**🌐 监控区域 (Storefront):**")
+
+    pills_key = f"pills_country_{chosen_app_id}"
+    if pills_key not in st.session_state or st.session_state[pills_key] not in available_countries:
+        st.session_state[pills_key] = st.session_state["active_country"]
+    elif st.session_state[pills_key] != st.session_state["active_country"]:
+        st.session_state[pills_key] = st.session_state["active_country"]
+
+    def on_sidebar_country_change():
+        val = st.session_state.get(pills_key)
+        if val and val in available_countries:
+            st.session_state["active_country"] = val
+
+    # 胶囊药丸标签选择当前地区
+    st.sidebar.pills(
+        "选择当前监控区域",
+        options=available_countries,
+        format_func=lambda c: STOREFRONT_LABELS.get(c, c),
+        label_visibility="collapsed",
+        key=pills_key,
+        on_change=on_sidebar_country_change,
+    )
+
+
+    current_country = st.session_state["active_country"]
+    selected_app = active_grouped_app["regions"].get(current_country)
+    if not selected_app and available_countries:
+        selected_app = active_grouped_app["regions"][available_countries[0]]
+        st.session_state["active_country"] = selected_app["country"]
+
+    # 快捷拓展监控地区弹窗 (无需重新粘贴 App ID)
+    unmonitored_countries = [c for c in STOREFRONT_MAP.keys() if c not in available_countries]
+    if unmonitored_countries:
+        with st.sidebar.popover("➕ 为此 App 拓展新地区", use_container_width=True):
+            st.markdown(f"##### ➕ 拓展监控地区")
+            st.caption(f"当前主应用：**{active_grouped_app['name']}** (`id{chosen_app_id}`)")
+            add_c_choice = st.selectbox(
+                "选择要开启监控的区域",
+                unmonitored_countries,
+                format_func=lambda c: STOREFRONT_LABELS.get(c, c),
+                key="sidebar_expand_country_select",
+            )
+            if st.button("🚀 立即拉取并开通", type="primary", use_container_width=True, key="sidebar_expand_country_btn"):
+                with st.spinner(f"正在从 Apple 拉取「{add_c_choice}」区数据..."):
+                    try:
+                        n_meta = fetch_app_Metadata(chosen_app_id, add_c_choice)
+                        if n_meta:
+                            upsert_app(
+                                app_id=n_meta["app_id"],
+                                name=n_meta["name"],
+                                country=add_c_choice,
+                                is_own_app=True,
+                                subtitle=n_meta["subtitle"],
+                                icon_url=n_meta["icon_url"],
+                                rating=n_meta["rating"],
+                                rating_count=n_meta["rating_count"],
+                                version=n_meta.get("version", ""),
+                            )
+                            st.session_state["active_country"] = add_c_choice
+                            st.toast(f"成功为应用开通「{add_c_choice}」监控！")
+                            st.rerun()
+                        else:
+                            st.warning(f"Lookup 未查找到该应用，请检查该 App 在「{add_c_choice}」区是否已正式上架。")
+                    except Exception as exc:
+                        st.error(f"拓展失败: {exc}")
+
+    if selected_app:
+        if selected_app.get("icon_url"):
+            st.sidebar.image(selected_app["icon_url"], width=64)
+        st.sidebar.markdown(
+            f"**当前区域名称:** {selected_app['name']}  \n"
+            f"**App ID:** `id{selected_app['app_id']}`  \n"
+            f"**Storefront:** `{STOREFRONT_LABELS.get(selected_app['country'], selected_app['country'])}`  \n"
+            f"**当前版本:** `{selected_app.get('version') or '-'}`  \n"
+            f"**当前评分:** ⭐ {selected_app['rating']} ({selected_app['rating_count']:,} 条评论)  \n"
+            f"**数据规模:** 🔑 `{selected_app.get('keyword_count', 0)}` 个词 · ⚔️ `{selected_app.get('competitor_count', 0)}` 款竞品"
+        )
+        if st.sidebar.button("🔄 刷新当前区域线上状态", use_container_width=True, help="立即调用 Apple Lookup 接口更新该 App 的版本、评分与评论总数"):
+            with st.spinner("正在请求 Apple 接口拉取最新元数据..."):
+                try:
+                    meta = fetch_app_Metadata(selected_app["app_id"], selected_app["country"])
+                    if meta:
+                        old_ver = (selected_app.get("version") or "").strip()
+                        new_ver = (meta.get("version") or "").strip()
+                        if old_ver and new_ver and old_ver != new_ver:
+                            add_version_release(
+                                selected_app["app_id"],
+                                selected_app["country"],
+                                new_ver,
+                                date.today().isoformat(),
+                                notes=f"手动刷新检测到新版本发布：v{old_ver} → v{new_ver}",
+                            )
+                            st.sidebar.info(f"🎉 检测到新版本上线：v{old_ver} → v{new_ver}，已自动记录发版日！")
+
+                        upsert_app(
+                            app_id=meta["app_id"],
+                            name=meta["name"],
+                            country=selected_app["country"],
+                            is_own_app=True,
+                            subtitle=meta["subtitle"],
+                            icon_url=meta["icon_url"],
+                            rating=meta["rating"],
+                            rating_count=meta["rating_count"],
+                            version=new_ver or old_ver,
                         )
-                        st.sidebar.info(f"🎉 检测到新版本上线：v{old_ver} → v{new_ver}，已自动记录发版日！")
-
-                    upsert_app(
-                        app_id=meta["app_id"],
-                        name=meta["name"],
-                        country=selected_app["country"],
-                        is_own_app=True,
-                        subtitle=meta["subtitle"],
-                        icon_url=meta["icon_url"],
-                        rating=meta["rating"],
-                        rating_count=meta["rating_count"],
-                        version=new_ver or old_ver,
-                    )
-                    st.toast(f"已同步最新状态：⭐ {meta['rating']} ({meta['rating_count']:,} 评价) · v{new_ver or '-'}")
-                    st.rerun()
-                else:
-                    st.sidebar.warning("Apple Lookup 接口未返回应用数据")
-            except Exception as exc:
-                st.sidebar.error(f"拉取失败: {exc}")
+                        st.toast(f"已同步最新状态：⭐ {meta['rating']} ({meta['rating_count']:,} 评价) · v{new_ver or '-'}")
+                        st.rerun()
+                    else:
+                        st.sidebar.warning("Apple Lookup 接口未返回应用数据")
+                except Exception as exc:
+                    st.sidebar.error(f"拉取失败: {exc}")
 else:
     st.sidebar.info("💡 暂无监控应用，请点击下方或前往「模块 1」添加您的第一款 App。")
 
-# 侧边栏全局快捷添加应用弹窗 (无论在哪个 Tab 都能一秒添加)
-with st.sidebar.popover("➕ 快捷添加 App", use_container_width=True):
-    st.markdown("##### ➕ 快捷添加监控 App")
-    st.caption("支持输入纯数字 ID、带 id 前缀、或 App Store 链接")
+# 侧边栏全局快捷添加应用弹窗 (支持一次性多选国家批量添加)
+with st.sidebar.popover("➕ 快捷添加 App (支持多选地区)", use_container_width=True):
+    st.markdown("##### ➕ 快捷批量添加监控 App")
+    st.caption("输入纯数字 ID 或链接，可直接多选开启多个监控区域")
     quick_input = st.text_input(
         "App ID 或链接",
         key="quick_app_input",
         placeholder="例如 6809107174 或粘贴 App Store 链接",
     )
     quick_info = extract_app_info_from_input(quick_input)
-    default_q_country_idx = 0
+    default_q_selected = ["CN", "US"]
     if quick_info.get("country") and quick_info["country"] in STOREFRONT_MAP:
-        default_q_country_idx = list(STOREFRONT_MAP.keys()).index(quick_info["country"])
-        st.caption(f"✨ 检测到地区：`{quick_info['country']}`")
+        if quick_info["country"] not in default_q_selected:
+            default_q_selected = [quick_info["country"]] + default_q_selected
+        st.caption(f"✨ 检测到链接中的地区：`{quick_info['country']}`")
 
-    quick_country = st.selectbox(
-        "国家/地区 (Storefront)",
-        list(STOREFRONT_MAP.keys()),
-        index=default_q_country_idx,
-        key="quick_country_select",
+    quick_countries = st.multiselect(
+        "选择要监控的区域 (可多选)",
+        options=list(STOREFRONT_MAP.keys()),
+        default=default_q_selected,
+        format_func=lambda c: STOREFRONT_LABELS.get(c, c),
+        key="quick_countries_select",
     )
-    if st.button("🚀 识别并立即添加", type="primary", key="quick_add_btn", use_container_width=True):
-        if not quick_input.strip():
-            st.error("请输入有效的 App ID 或链接")
+    if st.button("🚀 批量识别并添加", type="primary", key="quick_add_btn", use_container_width=True):
+        if not quick_input.strip() or not quick_countries:
+            st.error("请输入有效的 App ID 并至少选择一个国家/地区")
         else:
-            try:
-                meta = fetch_app_Metadata(quick_input, quick_country)
-                if meta:
-                    upsert_app(
-                        app_id=meta["app_id"],
-                        name=meta["name"],
-                        country=quick_country,
-                        is_own_app=True,
-                        subtitle=meta["subtitle"],
-                        icon_url=meta["icon_url"],
-                        rating=meta["rating"],
-                        rating_count=meta["rating_count"],
-                        version=meta.get("version", ""),
-                    )
-                    st.session_state["active_app_id"] = meta["app_id"]
-                    st.toast(f"成功添加并切换至：{meta['name']}")
+            with st.spinner(f"正在批量从 Apple 拉取 {len(quick_countries)} 个区域数据..."):
+                res = batch_fetch_app_metadata(quick_input, quick_countries)
+                success_map = res["success"]
+                if success_map:
+                    for cc, meta in success_map.items():
+                        upsert_app(
+                            app_id=meta["app_id"],
+                            name=meta["name"],
+                            country=cc,
+                            is_own_app=True,
+                            subtitle=meta["subtitle"],
+                            icon_url=meta["icon_url"],
+                            rating=meta["rating"],
+                            rating_count=meta["rating_count"],
+                            version=meta.get("version", ""),
+                        )
+                    first_aid = list(success_map.values())[0]["app_id"]
+                    first_c = list(success_map.keys())[0]
+                    st.session_state["active_app_id"] = first_aid
+                    st.session_state["active_country"] = first_c
+                    st.session_state[f"pills_country_{first_aid}"] = first_c
+                    st.toast(f"成功批量开通 {len(success_map)} 个区域监控！")
                     st.rerun()
                 else:
-                    st.warning("Lookup 接口未返回结果，请检查 App ID 在所选地区是否已上架。")
-            except Exception as exc:
-                st.error(f"拉取失败: {exc}")
+                    st.warning("所有勾选区域均未查到结果，请检查 App ID 在所选地区是否已正式上架。")
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs(
     [
@@ -196,120 +284,140 @@ with tab1:
     sub_tab_add, sub_tab_manage, sub_tab_comp = st.tabs(
         [
             "➕ 添加监控应用 (Add App)",
-            f"📋 已监控应用列表与删除管理 ({len(own_apps)})",
+            f"📋 已监控应用列表与区域管理 ({len(grouped_apps)})",
             "⚔️ 竞品关联管理 (Competitors)",
         ]
     )
 
     # --------------------------------------------------------------------------
-    # 子 Tab 1：添加监控应用
+    # 子 Tab 1：添加监控应用 (支持批量多选地区)
     # --------------------------------------------------------------------------
     with sub_tab_add:
-        st.markdown("#### ➕ 添加我方监控 App (P0)")
-        st.caption("输入纯数字 ID（如 `6809107174`）、带 id 前缀（如 `id6809107174`）或完整 App Store 链接即可一键识别添加。")
+        st.markdown("#### ➕ 批量添加我方监控 App (支持多选地区)")
+        st.caption("输入纯数字 ID（如 `6809107174`）、带 id 前缀（如 `id6809107174`）或完整 App Store 链接，可直接多选并同时开启多个区域监控。")
 
         app_input = st.text_input(
             "App Store 链接或 App ID (trackId)",
             value="",
             placeholder="例如 6809107174、id6809107174 或 https://apps.apple.com/cn/app/.../id6809107174",
-            key="tab4_app_input",
+            key="tab1_app_input",
             help="支持自动从链接中识别国家地区",
         )
 
         # 智能嗅探链接中的国家代码
         parsed_info = extract_app_info_from_input(app_input)
         inferred_cc = parsed_info.get("country")
-        default_cc_idx = 0
+        default_selected_ccs = ["CN", "US"]
         if inferred_cc and inferred_cc in STOREFRONT_MAP:
-            default_cc_idx = list(STOREFRONT_MAP.keys()).index(inferred_cc)
-            st.info(f"💡 检测到链接中的国家/地区为 **{inferred_cc}**，已自动为您预选。")
+            if inferred_cc not in default_selected_ccs:
+                default_selected_ccs = [inferred_cc] + default_selected_ccs
+            st.info(f"💡 检测到链接中的国家/地区为 **{STOREFRONT_LABELS.get(inferred_cc, inferred_cc)}**，已为您优先勾选。")
 
-        c_col1, c_col2 = st.columns([1, 1])
-        with c_col1:
-            country_code = st.selectbox(
-                "国家/地区 (Storefront)",
-                list(STOREFRONT_MAP.keys()),
-                index=default_cc_idx,
-                key="tab4_country_code",
-            )
-        with c_col2:
-            custom_subtitle = st.text_input(
-                "副标题备忘 (选填，留空自动从线上标题/副标题提取)",
-                placeholder="例如：儿童宝宝吃药提醒与家庭药箱记录",
-                key="tab4_custom_sub",
-            )
+        # 常用地区快速预设选择
+        st.markdown("**选择要开通的监控国家/地区 (可多选)：**")
+        q_cols = st.columns([1.2, 1.2, 1.2, 1, 2])
+        if q_cols[0].button("🇨🇳+🇺🇸 中美常用", key="preset_cn_us"):
+            st.session_state["tab1_selected_countries"] = ["CN", "US"]
+        if q_cols[1].button("🌏 东亚五区", key="preset_asia"):
+            st.session_state["tab1_selected_countries"] = ["CN", "JP", "KR", "TW", "HK"]
+        if q_cols[2].button("🌍 欧美四国", key="preset_west"):
+            st.session_state["tab1_selected_countries"] = ["US", "GB", "DE", "FR"]
+        if q_cols[3].button("🌐 全选", key="preset_all"):
+            st.session_state["tab1_selected_countries"] = list(STOREFRONT_MAP.keys())
+
+        curr_def_countries = st.session_state.get("tab1_selected_countries") or default_selected_ccs
+
+        selected_countries = st.multiselect(
+            "目标国家/地区 (Storefront)",
+            list(STOREFRONT_MAP.keys()),
+            default=curr_def_countries,
+            format_func=lambda c: STOREFRONT_LABELS.get(c, c),
+            key="tab1_multiselect_countries",
+        )
+
+        custom_subtitle = st.text_input(
+            "副标题备忘 (选填，留空将自动从各地区线上商店标题/副标题提取)",
+            placeholder="例如：儿童宝宝吃药提醒与家庭药箱记录",
+            key="tab1_custom_sub",
+        )
 
         btn_c1, btn_c2 = st.columns([1, 1])
         with btn_c1:
-            do_preview = st.button("🔍 识别并预览应用详情", type="primary", use_container_width=True)
+            do_preview = st.button("🔍 批量识别并预览各地区详情", type="primary", use_container_width=True)
         with btn_c2:
-            do_direct_add = st.button("⚡ 直接添加并设为当前监控", use_container_width=True)
+            do_direct_add = st.button("⚡ 一键批量添加并设为当前监控", use_container_width=True)
 
         if do_preview:
-            if not app_input.strip():
-                st.error("请输入有效的 App ID 或 App Store 链接")
+            if not app_input.strip() or not selected_countries:
+                st.error("请输入有效的 App ID / 链接并至少勾选一个监控地区")
             else:
-                with st.spinner("正在请求 Apple Lookup 接口抓取应用元数据..."):
-                    try:
-                        meta = fetch_app_Metadata(app_input, country_code)
-                        if meta:
-                            st.session_state["tab4_preview_app"] = meta
-                        else:
-                            st.warning(f"Lookup 未查找到该应用，请检查该 App 在「{country_code}」区是否已正式上架。")
-                    except Exception as exc:
-                        st.error(f"拉取失败: {exc}")
+                with st.spinner("正在请求 Apple Lookup 接口抓取所选地区应用元数据..."):
+                    res = batch_fetch_app_metadata(app_input, selected_countries)
+                    st.session_state["tab1_preview_results"] = res
 
-        # 显示识别预览卡片
-        if "tab4_preview_app" in st.session_state:
-            meta = st.session_state["tab4_preview_app"]
+        # 显示批量识别预览卡片
+        if "tab1_preview_results" in st.session_state:
+            res = st.session_state["tab1_preview_results"]
+            succ = res["success"]
+            fail = res["failed"]
             st.markdown("---")
-            st.markdown("##### 📱 应用识别预览")
-            with st.container(border=True):
-                p_c1, p_c2 = st.columns([1, 4])
-                with p_c1:
-                    if meta.get("icon_url"):
-                        st.image(meta["icon_url"], width=84)
-                    else:
-                        st.markdown("📱")
-                with p_c2:
-                    st.markdown(f"#### {meta['name']}")
-                    st.markdown(f"**副标题/分类:** `{meta['subtitle']}` · **分类:** `{meta.get('genre', '-')}`")
-                    st.markdown(
-                        f"**App ID:** `id{meta['app_id']}` · **地区:** `{meta['country']}` · **当前版本:** `v{meta.get('version', '-')}`"
-                    )
-                    st.markdown(f"**用户评分:** ⭐ `{meta['rating']}` 分 · 💬 `{meta['rating_count']:,}` 条用户评论")
-                    if meta.get("seller"):
-                        st.caption(f"开发者: {meta['seller']}")
+            st.markdown("##### 📱 批量应用识别预览结果")
+            if succ:
+                st.success(f"成功识别 {len(succ)} 个区域数据：{', '.join(succ.keys())}")
+                for cc, meta in succ.items():
+                    with st.container(border=True):
+                        p_c1, p_c2 = st.columns([1, 4])
+                        with p_c1:
+                            if meta.get("icon_url"):
+                                st.image(meta["icon_url"], width=64)
+                            else:
+                                st.markdown("📱")
+                        with p_c2:
+                            st.markdown(f"**{STOREFRONT_LABELS.get(cc, cc)}: {meta['name']}**")
+                            st.caption(
+                                f"**副标题/分类:** `{meta['subtitle']}` · **当前版本:** `v{meta.get('version', '-')}` · "
+                                f"**评分:** ⭐ `{meta['rating']}` ({meta['rating_count']:,} 条评价)"
+                            )
+                if fail:
+                    st.warning(f"以下地区未能查找到该应用：{', '.join(fail)}（可能未在这些区域发行）")
 
-                if st.button("✅ 确认添加此应用为监控 App 并立即切换", type="primary", use_container_width=True, key="confirm_preview_add"):
-                    upsert_app(
-                        app_id=meta["app_id"],
-                        name=meta["name"],
-                        country=meta["country"],
-                        is_own_app=True,
-                        subtitle=custom_subtitle.strip() or meta["subtitle"],
-                        icon_url=meta["icon_url"],
-                        rating=meta["rating"],
-                        rating_count=meta["rating_count"],
-                        version=meta.get("version", ""),
-                    )
-                    st.session_state["active_app_id"] = meta["app_id"]
-                    st.session_state.pop("tab4_preview_app", None)
-                    st.toast(f"成功添加并切换监控应用：{meta['name']}")
+                if st.button("✅ 确认批量添加入库并立即聚焦", type="primary", use_container_width=True, key="confirm_batch_preview_add"):
+                    for cc, meta in succ.items():
+                        upsert_app(
+                            app_id=meta["app_id"],
+                            name=meta["name"],
+                            country=cc,
+                            is_own_app=True,
+                            subtitle=custom_subtitle.strip() or meta["subtitle"],
+                            icon_url=meta["icon_url"],
+                            rating=meta["rating"],
+                            rating_count=meta["rating_count"],
+                            version=meta.get("version", ""),
+                        )
+                    first_aid = list(succ.values())[0]["app_id"]
+                    first_c = list(succ.keys())[0]
+                    st.session_state["active_app_id"] = first_aid
+                    st.session_state["active_country"] = first_c
+                    st.session_state[f"pills_country_{first_aid}"] = first_c
+                    st.session_state.pop("tab1_preview_results", None)
+                    st.toast(f"成功为应用添加 {len(succ)} 个地区监控！")
                     st.rerun()
+            else:
+                st.error("所有勾选区域均未能拉取到应用信息，请检查 App ID 是否正确或已上架。")
 
         if do_direct_add:
-            if not app_input.strip():
-                st.error("请输入有效的 App ID 或 App Store 链接")
+            if not app_input.strip() or not selected_countries:
+                st.error("请输入有效的 App ID / 链接并至少勾选一个监控地区")
             else:
-                with st.spinner("正在请求 Apple 接口并添加入库..."):
-                    try:
-                        meta = fetch_app_Metadata(app_input, country_code)
-                        if meta:
+                with st.spinner("正在请求 Apple 接口并批量入库..."):
+                    res = batch_fetch_app_metadata(app_input, selected_countries)
+                    succ = res["success"]
+                    if succ:
+                        for cc, meta in succ.items():
                             upsert_app(
                                 app_id=meta["app_id"],
                                 name=meta["name"],
-                                country=country_code,
+                                country=cc,
                                 is_own_app=True,
                                 subtitle=custom_subtitle.strip() or meta["subtitle"],
                                 icon_url=meta["icon_url"],
@@ -317,13 +425,16 @@ with tab1:
                                 rating_count=meta["rating_count"],
                                 version=meta.get("version", ""),
                             )
-                            st.session_state["active_app_id"] = meta["app_id"]
-                            st.toast(f"成功添加并切换监控应用：{meta['name']}")
-                            st.rerun()
-                        else:
-                            st.warning(f"Lookup 接口未返回结果，请检查 App ID 在所选国家/地区是否已上架。")
-                    except Exception as exc:
-                        st.error(f"添加失败: {exc}")
+                        first_aid = list(succ.values())[0]["app_id"]
+                        first_c = list(succ.keys())[0]
+                        st.session_state["active_app_id"] = first_aid
+                        st.session_state["active_country"] = first_c
+                        st.session_state[f"pills_country_{first_aid}"] = first_c
+                        fail_msg = f"（未在 {', '.join(res['failed'])} 上架）" if res["failed"] else ""
+                        st.toast(f"成功开通 {len(succ)} 个监控区域！{fail_msg}")
+                        st.rerun()
+                    else:
+                        st.warning("所有勾选区域均未查到结果，请检查 App ID 在所选地区是否已正式上架。")
 
         # 手动录入兜底面板
         with st.expander("🛠️ 接口受限或需录入未上架/内测应用？点击手动添加"):
@@ -333,7 +444,7 @@ with tab1:
                 man_id = st.text_input("App ID (纯数字)", placeholder="例如 6809107174", key="man_id")
                 man_name = st.text_input("应用全名", placeholder="例如 喂药本 - 家庭用药管理", key="man_name")
             with m_col2:
-                man_cc = st.selectbox("地区代码", list(STOREFRONT_MAP.keys()), key="man_cc")
+                man_cc = st.selectbox("地区代码", list(STOREFRONT_MAP.keys()), format_func=lambda c: STOREFRONT_LABELS.get(c, c), key="man_cc")
                 man_sub = st.text_input("副标题", placeholder="例如 家庭用药管理", key="man_sub")
             if st.button("手动保存并加入监控", key="man_save_btn"):
                 if not man_id.strip() or not man_name.strip():
@@ -348,107 +459,129 @@ with tab1:
                         subtitle=man_sub.strip(),
                     )
                     st.session_state["active_app_id"] = clean_man_id
+                    st.session_state["active_country"] = man_cc
                     st.toast(f"手动添加成功：{man_name.strip()}")
                     st.rerun()
 
     # --------------------------------------------------------------------------
-    # 子 Tab 2：已监控应用列表与删除管理
+    # 子 Tab 2：已监控应用列表与区域管理 (按 App 聚合卡片)
     # --------------------------------------------------------------------------
     with sub_tab_manage:
-        st.markdown(f"#### 📋 已监控应用列表（共监控 **{len(own_apps)}** 款应用）")
-        st.caption("在此集中查看所有已监控应用的数据概况，支持一键切换当前工作台焦点或彻底删除应用及关联词库。")
+        total_regions_count = sum(len(a["countries"]) for a in grouped_apps)
+        st.markdown(f"#### 📋 已监控应用列表（共监控 **{len(grouped_apps)}** 款主应用，涵盖 **{total_regions_count}** 个监控地区）")
+        st.caption("以主应用为卡片集中管理各开通区域，支持随时为已有 App 拓展新国家、单独切换聚焦或安全移除。")
 
-        if not own_apps:
+        if not grouped_apps:
             st.info("💡 当前暂无任何监控应用，请在「➕ 添加监控应用」子标签中添加您的第一款 App。")
         else:
-            for app in own_apps:
-                is_active = (
-                    selected_app is not None
-                    and app["app_id"] == selected_app["app_id"]
-                    and app["country"] == selected_app["country"]
-                )
+            for g_app in grouped_apps:
+                aid = g_app["app_id"]
+                is_active_app = (st.session_state.get("active_app_id") == aid)
+                border_color = "🌟 " if is_active_app else ""
+
                 with st.container(border=True):
-                    c_icon, c_info, c_action = st.columns([1, 4, 2])
-                    with c_icon:
-                        if app.get("icon_url"):
-                            st.image(app["icon_url"], width=68)
+                    # 顶部：应用概要
+                    t_c1, t_c2, t_c3 = st.columns([1, 4, 2])
+                    with t_c1:
+                        if g_app.get("icon_url"):
+                            st.image(g_app["icon_url"], width=68)
                         else:
                             st.markdown("📱")
-                    with c_info:
-                        title_prefix = "🌟 **[当前监控]** " if is_active else ""
-                        st.markdown(f"{title_prefix}**{app['name']}**")
+                    with t_c2:
+                        st.markdown(f"### {border_color}{g_app['name']}")
                         st.caption(
-                            f"**App ID:** `id{app['app_id']}` · **地区:** `{app['country']}` · **版本:** `v{app.get('version') or '-'}` · "
-                            f"**评分:** ⭐ {app['rating']} ({app['rating_count']:,} 评价)"
+                            f"**App ID:** `id{aid}` ｜ **开通地区数:** `{len(g_app['countries'])} 个` ｜ "
+                            f"**全区域总词数:** `{g_app['total_keywords']} 个` ｜ **总竞品数:** `{g_app['total_competitors']} 款`"
                         )
-                        st.markdown(
-                            f"📊 **数据规模：** 🔑 监控词数 `{app.get('keyword_count', 0)}` 个 ｜ ⚔️ 关联竞品 `{app.get('competitor_count', 0)}` 款"
-                        )
-                    with c_action:
-                        if not is_active:
-                            if st.button(
-                                "📌 设为当前",
-                                key=f"set_active_{app['app_id']}_{app['country']}",
-                                use_container_width=True,
-                            ):
-                                st.session_state["active_app_id"] = app["app_id"]
-                                st.toast(f"已切换当前监控应用为：{app['name']}")
-                                st.rerun()
-                        else:
-                            st.button("✅ 正在监控中", disabled=True, use_container_width=True, key=f"btn_act_{app['app_id']}")
-
-                        # 刷新单款应用线上状态
-                        if st.button("🔄 同步最新状态", key=f"refresh_state_{app['app_id']}_{app['country']}", use_container_width=True):
-                            with st.spinner(f"正在更新「{app['name']}」线上数据..."):
-                                try:
-                                    meta = fetch_app_Metadata(app["app_id"], app["country"])
-                                    if meta:
-                                        old_ver = (app.get("version") or "").strip()
-                                        new_ver = (meta.get("version") or "").strip()
-                                        if old_ver and new_ver and old_ver != new_ver:
-                                            add_version_release(
-                                                app["app_id"],
-                                                app["country"],
-                                                new_ver,
-                                                date.today().isoformat(),
-                                                notes=f"手动刷新检测到新版本发布：v{old_ver} → v{new_ver}",
-                                            )
-                                        upsert_app(
-                                            app_id=meta["app_id"],
-                                            name=meta["name"],
-                                            country=app["country"],
-                                            is_own_app=True,
-                                            subtitle=meta["subtitle"],
-                                            icon_url=meta["icon_url"],
-                                            rating=meta["rating"],
-                                            rating_count=meta["rating_count"],
-                                            version=new_ver or old_ver,
-                                        )
-                                        st.toast(f"「{app['name']}」状态已同步：⭐ {meta['rating']} · v{new_ver or '-'}")
-                                        st.rerun()
-                                    else:
-                                        st.warning("未查找到应用线上数据")
-                                except Exception as exc:
-                                    st.error(f"同步失败: {exc}")
-
-                        # 删除应用 (使用 Popover 进行防误触二次确认)
-                        with st.popover("🗑️ 删除此 App", use_container_width=True):
-                            st.warning(f"⚠️ 确认彻底删除应用「{app['name']}」？")
-                            st.caption(
-                                f"此操作将同时**永久清空**关联的 {app.get('keyword_count', 0)} 个关键词及历史排名快照、"
-                                f"{app.get('competitor_count', 0)} 款关联竞品，不可恢复！"
-                            )
-                            if st.button(
-                                "🔥 确认永久删除",
-                                type="primary",
-                                key=f"confirm_del_{app['app_id']}_{app['country']}",
-                                use_container_width=True,
-                            ):
-                                delete_app(app["app_id"], app["country"])
-                                if is_active:
+                    with t_c3:
+                        # 彻底删除整个 App 的所有地区
+                        with st.popover("🗑️ 彻底删除整个 App", use_container_width=True):
+                            st.error(f"⚠️ 确认彻底删除「{g_app['name']}」在所有地区的数据？")
+                            st.caption(f"此操作将同时永久清空该 App 在 {', '.join(g_app['countries'])} 的全部词库与竞品！")
+                            if st.button("🔥 确认永久删除全量数据", type="primary", key=f"del_entire_app_{aid}", use_container_width=True):
+                                delete_app(aid)
+                                if is_active_app:
                                     st.session_state.pop("active_app_id", None)
-                                st.toast(f"已彻底删除应用「{app['name']}」及所有关联数据")
+                                    st.session_state.pop("active_country", None)
+                                st.toast(f"已彻底删除应用「{g_app['name']}」")
                                 st.rerun()
+
+                    st.markdown("---")
+                    st.markdown("##### 🌐 该 App 已开启的监控区域明细：")
+
+                    for r_code in g_app["countries"]:
+                        r_info = g_app["regions"][r_code]
+                        is_active_region = (is_active_app and st.session_state.get("active_country") == r_code)
+
+                        rc1, rc2, rc3 = st.columns([2.5, 3, 2])
+                        with rc1:
+                            active_badge = "🌟 **[当前工作区]** " if is_active_region else ""
+                            st.markdown(f"{active_badge}**{STOREFRONT_LABELS.get(r_code, r_code)}**")
+                            st.caption(f"区域名称: {r_info['name']}")
+                        with rc2:
+                            st.markdown(
+                                f"🔑 词数: `{r_info.get('keyword_count', 0)}` ｜ ⚔️ 竞品: `{r_info.get('competitor_count', 0)}` ｜ "
+                                f"⭐ `{r_info['rating']}` ({r_info['rating_count']:,} 评价) ｜ 版本: `v{r_info.get('version') or '-'}`"
+                            )
+                        with rc3:
+                            act_b1, act_b2 = st.columns(2)
+                            with act_b1:
+                                if not is_active_region:
+                                    if st.button("🎯 聚焦", key=f"focus_{aid}_{r_code}", use_container_width=True):
+                                        st.session_state["active_app_id"] = aid
+                                        st.session_state["active_country"] = r_code
+                                        st.session_state[f"pills_country_{aid}"] = r_code
+                                        st.toast(f"已切换工作区为：{g_app['name']} ({r_code})")
+                                        st.rerun()
+                                else:
+                                    st.button("✅ 已聚焦", disabled=True, key=f"focused_{aid}_{r_code}", use_container_width=True)
+                            with act_b2:
+                                with st.popover("🗑️ 移除", use_container_width=True):
+                                    st.caption(f"确认移除该 App 在「{r_code}」区的数据？")
+                                    if st.button("确认移除", type="primary", key=f"del_region_{aid}_{r_code}", use_container_width=True):
+                                        delete_app(aid, r_code)
+                                        if is_active_region:
+                                            st.session_state.pop("active_country", None)
+                                            st.session_state.pop(f"pills_country_{aid}", None)
+                                        st.toast(f"已移除 {r_code} 区域数据")
+                                        st.rerun()
+
+                    # 底部：快捷为此 App 扩充新地区
+                    un_countries = [c for c in STOREFRONT_MAP.keys() if c not in g_app["countries"]]
+                    if un_countries:
+                        with st.popover(f"➕ 为「{g_app['name']}」追加新监控地区", use_container_width=True):
+                            st.caption("直接选择想要新拓展的国家/地区，免输 App ID：")
+                            exp_c = st.selectbox(
+                                "选择新增地区",
+                                un_countries,
+                                format_func=lambda c: STOREFRONT_LABELS.get(c, c),
+                                key=f"card_add_c_{aid}",
+                            )
+                            if st.button("🚀 立即拉取并开通", type="primary", key=f"card_btn_add_{aid}"):
+                                with st.spinner(f"正在从 Apple 接口拉取 {exp_c} 区数据..."):
+                                    try:
+                                        new_m = fetch_app_Metadata(aid, exp_c)
+                                        if new_m:
+                                            upsert_app(
+                                                app_id=new_m["app_id"],
+                                                name=new_m["name"],
+                                                country=exp_c,
+                                                is_own_app=True,
+                                                subtitle=new_m["subtitle"],
+                                                icon_url=new_m["icon_url"],
+                                                rating=new_m["rating"],
+                                                rating_count=new_m["rating_count"],
+                                                version=new_m.get("version", ""),
+                                            )
+                                            st.session_state["active_app_id"] = aid
+                                            st.session_state["active_country"] = exp_c
+                                            st.toast(f"成功为「{g_app['name']}」开启「{exp_c}」监控！")
+                                            st.rerun()
+                                        else:
+                                            st.warning(f"Lookup 未查找到该应用，请检查该 App 在「{exp_c}」区是否已上架。")
+                                    except Exception as exc:
+                                        st.error(f"拓展失败: {exc}")
+
 
     # --------------------------------------------------------------------------
     # 子 Tab 3：竞品关联管理
@@ -460,7 +593,7 @@ with tab1:
         else:
             comps = list_competitors(selected_app["app_id"], selected_app["country"])
             st.caption(
-                f"当前已为 **{selected_app['name']} ({selected_app['country']})** 绑定 {len(comps)}/5 款核心竞品（查词时单次请求顺便记录竞品排名）："
+                f"当前已为 **{selected_app['name']}** 在 **{STOREFRONT_LABELS.get(selected_app['country'], selected_app['country'])}** 绑定 {len(comps)}/5 款核心竞品（查词时单次请求顺便记录竞品排名）："
             )
 
             if comps:
@@ -539,6 +672,35 @@ with tab2:
         country = selected_app["country"]
         competitors = list_competitors(app_id, country)
         comp_ids = [c["app_id"] for c in competitors]
+
+        # 顶部工作区上下文与原地切区操作
+        if active_grouped_app:
+            t2_c1, t2_c2 = st.columns([3, 2])
+            with t2_c1:
+                st.markdown(
+                    f"📱 **当前应用：** `{active_grouped_app['name']}` (`id{app_id}`) ｜ **区域：** `{STOREFRONT_LABELS.get(country, country)}`"
+                )
+            with t2_c2:
+                if len(active_grouped_app["countries"]) > 1:
+                    b_cols = st.columns(len(active_grouped_app["countries"]))
+                    for idx, c_code in enumerate(active_grouped_app["countries"]):
+                        if c_code == country:
+                            b_cols[idx].button(
+                                f"📍 {c_code}",
+                                disabled=True,
+                                key=f"t2_act_{app_id}_{c_code}",
+                                use_container_width=True,
+                            )
+                        else:
+                            if b_cols[idx].button(
+                                f"切至 {c_code}",
+                                key=f"t2_sw_{app_id}_{c_code}",
+                                use_container_width=True,
+                            ):
+                                st.session_state["active_country"] = c_code
+                                st.session_state[f"pills_country_{app_id}"] = c_code
+                                st.rerun()
+
 
         with st.expander("➕ 批量导入/添加关注关键词 & 版本发布日标记", expanded=True):
             c1, c2 = st.columns(2)
@@ -718,12 +880,25 @@ with tab2:
 # ==============================================================================
 with tab3:
     st.subheader("模块 3：关键词挖掘与难度评估器 (Keyword Explorer)")
-    seed_col, country_col = st.columns([3, 1])
+    if selected_app:
+        st.caption(
+            f"📱 当前联动监控应用：**{active_grouped_app['name']}** ｜ 默认搜索区域已自动对齐为 **{STOREFRONT_LABELS.get(selected_app['country'], selected_app['country'])}**"
+        )
+    seed_col, country_col = st.columns([3, 1.5])
     with seed_col:
         seed_kw = st.text_input("输入种子词（如：喂药、用药提醒、家庭药箱、记账）", value="喂药")
     with country_col:
-        default_cc_idx = list(STOREFRONT_MAP.keys()).index(selected_app["country"]) if selected_app and selected_app["country"] in STOREFRONT_MAP else 0
-        exp_country = st.selectbox("目标国家", list(STOREFRONT_MAP.keys()), index=default_cc_idx, key="exp_c")
+        curr_c = selected_app["country"] if selected_app else "CN"
+        all_storefronts = list(STOREFRONT_MAP.keys())
+        default_cc_idx = all_storefronts.index(curr_c) if curr_c in all_storefronts else 0
+        exp_country = st.selectbox(
+            "目标国家 (已自动对齐)",
+            all_storefronts,
+            index=default_cc_idx,
+            format_func=lambda c: STOREFRONT_LABELS.get(c, c),
+            key=f"exp_c_{curr_c}",
+        )
+
 
     c_hint, c_diff = st.columns(2)
     with c_hint:
@@ -919,7 +1094,7 @@ with tab5:
                 use_container_width=True,
             )
 
-        state_key = f"ai_report_{ai_app_id}_{ai_country}"
+        state_key = f"ai_report_v2_{ai_app_id}_{ai_country}"
         if run_agent_btn or state_key not in st.session_state:
             with st.spinner("🤖 AI Agent 正在深度分析历史排名趋势、竞品差集与字符权重分布..."):
                 if engine_choice.startswith("🧠") and llm_api_key.strip():
@@ -1007,11 +1182,13 @@ with tab5:
                         st.session_state["ai_synced_sub"] = prop["subtitle"]
                         st.session_state["ai_synced_kws"] = prop["keywords"]
                         st.toast("已同步至「模块 4：100 字符去重工作台」，请点击上方模块 4 标签查看！")
+        else:
+            st.info("💡 当前应用尚未在后台添加监控关键词。系统恪守「100% 真实数据量化」原则，不预设也不捏造任何方案。请前往上方【模块 3：拓词与难度评估】添加监控词，或在上方输入本次发版侧重点后点击生成！")
 
         # 3. 关键词四象限 ROI 评分与推荐归属位置表
-        st.markdown("#### 📊 三、监控词库 ROI 评分与元数据位置分配明细")
         eval_kws = report.get("evaluated_keywords", [])
         if eval_kws:
+            st.markdown("#### 📊 三、监控词库 ROI 评分与元数据位置分配明细")
             df_eval = pd.DataFrame(
                 [
                     {
@@ -1035,16 +1212,14 @@ with tab5:
         # 4. 高潜同赛道拓词补位建议与 Prompt 导出
         col_exp, col_prompt = st.columns(2)
         with col_exp:
-            st.markdown("#### 💡 四、同赛道高潜候选词参考（灵感库）")
-            st.caption("以下词根仅作为灵感参考，未加入您的 100 字符推荐；点击「➕ 加入监控」后才会进入您的词库并参与后续 ASO 决策与装箱：")
-            for item in report.get("expansion_suggestions", []):
-                ec1, ec2, ec3 = st.columns([3, 4, 2])
-                ec1.markdown(f"**{item['keyword']}** (`热度 {item['popularity']}` / `难度 {item['difficulty']}`)")
-                ec2.caption(item["reason"])
-                if ec3.button("➕ 加入监控", key=f"ai_exp_{item['keyword']}_{ai_app_id}"):
-                    add_keyword(ai_app_id, ai_country, item["keyword"], tag="长尾词", popularity=item["popularity"], difficulty=item["difficulty"])
-                    st.toast(f"已将「{item['keyword']}」加入监控词库！")
-                    st.rerun()
+            st.markdown("#### 💡 四、监控词库储备池（未被正副标题占用的高优词）")
+            reserves = report.get("candidate_reserves", [])
+            if reserves:
+                st.caption("以下为您词库中未被占用至主副标题的高 ROI 词汇，已优先纳入 100 字符栏装箱：")
+                for item in reserves:
+                    st.markdown(f"- **{item['keyword']}** (`ROI: {item['roi_score']}` · 热度 `{item['popularity']}` / 难度 `{item['difficulty']}`) — {item['action_reason']}")
+            else:
+                st.caption("当前词库中所有监控词均已被高密度装配入推荐方案中；若需更多词根，可在【模块 3】添加新监控。")
 
         with col_prompt:
             st.markdown("#### 📋 五、导出数据包 Prompt / 历史推荐记录")
@@ -1052,9 +1227,12 @@ with tab5:
             with st.expander("查看/复制发往大模型的完整数据 Prompt", expanded=False):
                 st.code(prompt_str, language="markdown")
 
-            hist_recs = list_ai_recommendations(ai_app_id, ai_country, limit=5)
+            hist_recs = [
+                hr for hr in list_ai_recommendations(ai_app_id, ai_country, limit=10)
+                if "存钱" not in hr["recommended_title"] and "记账" not in hr["recommended_title"]
+            ][:5]
             if hist_recs:
-                st.caption(f"最近生成的 AI 推荐快照（共 {len(hist_recs)} 条）：")
+                st.caption(f"最近生成的有效 AI 推荐快照（共 {len(hist_recs)} 条）：")
                 for hr in hist_recs:
                     st.markdown(
                         f"- `{hr['created_at']}` (**{hr['engine_mode']}**) → 标题: `{hr['recommended_title']}` | 100字符长度: `{len(hr['recommended_keywords'])}`"
