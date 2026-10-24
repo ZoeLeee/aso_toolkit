@@ -67,12 +67,18 @@ streamlit run app.py
 ### 3. 手动触发部署
 进入 GitHub 仓库页面 -> **Actions** -> **Deploy ASO Toolkit - Production** -> **Run workflow**，选择目标分支（默认 `master`）即可自动完成镜像打包、推送与远程服务器部署。
 
-### 4. 生产环境配置每日定时爬虫
-容器部署成功后，可在服务器上添加定时任务（如每日早上 8:00）：
-```bash
-crontab -e
-# 添加以下任务 (利用 docker exec 运行容器内爬虫脚本)：
-0 8 * * * docker exec aso-toolkit-production python3 cron_tracker.py --sleep 3.5
-```
+### 4. 容器内自闭环自动化（开箱即用）
+
+容器镜像已内置全功能启动入口 [entrypoint.sh](./entrypoint.sh)，支持 **自闭环后台调度**，部署后无需在宿主机配置任何定时任务：
+- **容器启动时**：后台常驻 ASO 巡检守护进程 (`cron_tracker.py --daemon`)，前台运行 Streamlit Web 服务。
+- **每日定时执行**：默认在每日 `08:00`（系统时区 `Asia/Shanghai`）自动触发，同步 App 线上状态（评分、评论数、版本）、自动识别新版本上线并标记发版日里程碑、抓取全量关键词排名，若暴跌推送到 Webhook。
+- **可选环境变量**：
+  - `ENABLE_DAEMON=true`（默认启用，如设为 `false` 则关闭容器内守护进程，改由宿主机调度）
+  - `ASO_DAEMON_TIME="08:00"`（自定义每日自动拉取时间，格式 `HH:MM`）
+
+> **备选（宿主机 Crontab 外部触发）**：若将 `ENABLE_DAEMON` 设为 `false`，可由宿主机 crontab 调用：
+> ```bash
+> 0 8 * * * docker exec -d aso-toolkit-production python3 cron_tracker.py --sleep 3.5
+> ```
 
 更多高级功能与工作流请查看 **[USER_GUIDE.md](./USER_GUIDE.md)**。

@@ -92,6 +92,40 @@ if option_labels:
         f"**当前评分:** ⭐ {selected_app['rating']} ({selected_app['rating_count']:,} 条评论)  \n"
         f"**数据规模:** 🔑 `{selected_app.get('keyword_count', 0)}` 个词 · ⚔️ `{selected_app.get('competitor_count', 0)}` 款竞品"
     )
+    if st.sidebar.button("🔄 刷新 App 线上最新状态", use_container_width=True, help="立即调用 Apple Lookup 接口更新该 App 的版本、评分与评论总数"):
+        with st.spinner("正在请求 Apple 接口拉取最新元数据..."):
+            try:
+                meta = fetch_app_Metadata(selected_app["app_id"], selected_app["country"])
+                if meta:
+                    old_ver = (selected_app.get("version") or "").strip()
+                    new_ver = (meta.get("version") or "").strip()
+                    if old_ver and new_ver and old_ver != new_ver:
+                        add_version_release(
+                            selected_app["app_id"],
+                            selected_app["country"],
+                            new_ver,
+                            date.today().isoformat(),
+                            notes=f"手动刷新检测到新版本发布：v{old_ver} → v{new_ver}",
+                        )
+                        st.sidebar.info(f"🎉 检测到新版本上线：v{old_ver} → v{new_ver}，已自动记录发版日！")
+
+                    upsert_app(
+                        app_id=meta["app_id"],
+                        name=meta["name"],
+                        country=selected_app["country"],
+                        is_own_app=True,
+                        subtitle=meta["subtitle"],
+                        icon_url=meta["icon_url"],
+                        rating=meta["rating"],
+                        rating_count=meta["rating_count"],
+                        version=new_ver or old_ver,
+                    )
+                    st.toast(f"已同步最新状态：⭐ {meta['rating']} ({meta['rating_count']:,} 评价) · v{new_ver or '-'}")
+                    st.rerun()
+                else:
+                    st.sidebar.warning("Apple Lookup 接口未返回应用数据")
+            except Exception as exc:
+                st.sidebar.error(f"拉取失败: {exc}")
 else:
     st.sidebar.info("💡 暂无监控应用，请点击下方或前往「模块 1」添加您的第一款 App。")
 
@@ -362,6 +396,40 @@ with tab1:
                                 st.rerun()
                         else:
                             st.button("✅ 正在监控中", disabled=True, use_container_width=True, key=f"btn_act_{app['app_id']}")
+
+                        # 刷新单款应用线上状态
+                        if st.button("🔄 同步最新状态", key=f"refresh_state_{app['app_id']}_{app['country']}", use_container_width=True):
+                            with st.spinner(f"正在更新「{app['name']}」线上数据..."):
+                                try:
+                                    meta = fetch_app_Metadata(app["app_id"], app["country"])
+                                    if meta:
+                                        old_ver = (app.get("version") or "").strip()
+                                        new_ver = (meta.get("version") or "").strip()
+                                        if old_ver and new_ver and old_ver != new_ver:
+                                            add_version_release(
+                                                app["app_id"],
+                                                app["country"],
+                                                new_ver,
+                                                date.today().isoformat(),
+                                                notes=f"手动刷新检测到新版本发布：v{old_ver} → v{new_ver}",
+                                            )
+                                        upsert_app(
+                                            app_id=meta["app_id"],
+                                            name=meta["name"],
+                                            country=app["country"],
+                                            is_own_app=True,
+                                            subtitle=meta["subtitle"],
+                                            icon_url=meta["icon_url"],
+                                            rating=meta["rating"],
+                                            rating_count=meta["rating_count"],
+                                            version=new_ver or old_ver,
+                                        )
+                                        st.toast(f"「{app['name']}」状态已同步：⭐ {meta['rating']} · v{new_ver or '-'}")
+                                        st.rerun()
+                                    else:
+                                        st.warning("未查找到应用线上数据")
+                                except Exception as exc:
+                                    st.error(f"同步失败: {exc}")
 
                         # 删除应用 (使用 Popover 进行防误触二次确认)
                         with st.popover("🗑️ 删除此 App", use_container_width=True):
